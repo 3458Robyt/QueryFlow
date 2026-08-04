@@ -1,0 +1,25 @@
+{
+  "name": "queryflow",
+  "version": "0.1.0",
+  "description": "Flujo seguro para crear, revisar, validar y publicar SQL en Google Cloud.",
+  "author": {
+    "name": "QueryFlow"
+  },
+  "repository": "https://github.com/3458Robyt/QueryFlow",
+  "keywords": ["sql", "bigquery", "workbench", "review"],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "QueryFlow",
+    "shortDescription": "SQL revisable con dry-run, muestra y digest.",
+    "longDescription": "Guía a Codex y al analista por un flujo de catálogo, tarea aislada, diff web, validación, muestra aprobada y publicación controlada.",
+    "developerName": "QueryFlow",
+    "category": "Developer tools",
+    "capabilities": ["Read", "Write"],
+    "websiteURL": "https://github.com/3458Robyt/QueryFlow",
+    "defaultPrompt": [
+      "Usa QueryFlow para crear o modificar una query y mostrar el diff antes de publicar.",
+      "Valida esta query con dry-run y prepara una muestra de tres filas con digest aprobado."
+    ],
+    "brandColor": "#1f6feb"
+  }
+}

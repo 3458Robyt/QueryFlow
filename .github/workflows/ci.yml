@@ -1,0 +1,25 @@
+name: QueryFlow CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: ${{ matrix.python-version }}
+      - run: uv run python -m unittest test_queryflow.py tests
+      - run: uv build
+      - run: python3 scripts/validate_plugin.py plugins/queryflow
+      - run: python3 scripts/check_release_hygiene.py
