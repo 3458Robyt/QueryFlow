@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "queryflow-gcp"
+version = "0.1.0"
+description = "Flujo seguro y revisable para SQL y notebooks en Google Cloud"
+requires-python = ">=3.11"
+dependencies = [
+  "websockets>=15,<16",
+  "sqlglot>=25,<30",
+]
+readme = "README.md"
+keywords = ["bigquery", "codex", "sql", "workbench"]
+
+[project.scripts]
+queryflow = "queryflow.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["queryflow*"]
+
+[tool.setuptools.package-data]
+queryflow = ["py.typed"]

@@ -1,0 +1,43 @@
+# Local Python and build output
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+build/
+dist/
+.venv/
+.uv/
+
+# QueryFlow local state and operational artifacts
+.queryflow/
+queryflow.yaml
+queryflow.*.yaml
+queryflow.yaml.example
+catalog.json
+tasks/
+reports/
+pilot/
+audit/
+*-audit/
+sample-receipt.json
+
+# Migration workflow is intentionally separate from QueryFlow
+Diccionario.txt
+rewrite_notebook_routes.py
+migrate_notebooks_query.py
+auditoria_limpieza.py
+resumen_migracion_notebooks.md
+test_rewrite_notebook_routes.py
+
+# IDE and OS files
+.cloudshell/
+.idea/
+.vscode/
+.DS_Store
+
+# Workspace-only agent notes
+AGENTS.md
+QUERYFLOW.md
+docs/superpowers/
