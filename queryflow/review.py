@@ -17,16 +17,39 @@ def _lines(value: str) -> list[str]:
     return value.splitlines()
 
 
-def _unified_table(before: str, after: str) -> str:
+def _unified_table(before: str, after: str, *, context_lines: int = 3) -> str:
     rows: list[str] = []
-    matcher = difflib.SequenceMatcher(None, _lines(before), _lines(after), autojunk=False)
+    before_lines = _lines(before)
+    after_lines = _lines(after)
+    matcher = difflib.SequenceMatcher(None, before_lines, after_lines, autojunk=False)
     old_line = 1
     new_line = 1
     for tag, old_start, old_end, new_start, new_end in matcher.get_opcodes():
-        old_values = _lines(before)[old_start:old_end]
-        new_values = _lines(after)[new_start:new_end]
+        old_values = before_lines[old_start:old_end]
+        new_values = after_lines[new_start:new_end]
         if tag == "equal":
-            for value in old_values:
+            keep = max(0, min(int(context_lines), 20))
+            visible_values = old_values
+            hidden = 0
+            if keep == 0:
+                visible_values = []
+                hidden = len(old_values)
+            elif len(old_values) > keep * 2:
+                visible_values = [*old_values[:keep], *old_values[-keep:]]
+                hidden = len(old_values) - len(visible_values)
+            if hidden and not visible_values:
+                rows.append(
+                    f'<tr class="fold"><td></td><td></td><td>…</td><td>{hidden} líneas de contexto ocultas</td></tr>'
+                )
+                old_line += hidden
+                new_line += hidden
+            for index, value in enumerate(visible_values):
+                if hidden and index == keep:
+                    rows.append(
+                        f'<tr class="fold"><td></td><td></td><td>…</td><td>{hidden} líneas de contexto ocultas</td></tr>'
+                    )
+                    old_line += hidden
+                    new_line += hidden
                 rows.append(
                     f'<tr class="ctx"><td>{old_line}</td><td>{new_line}</td><td> </td><td>{html.escape(value)}</td></tr>'
                 )
@@ -47,18 +70,28 @@ def _unified_table(before: str, after: str) -> str:
                     new_line += 1
     return (
         '<table class="unified"><thead><tr><th>Original</th><th>Propuesta</th>'
-        '<th></th><th>Contenido</th></tr></thead><tbody>'
+        "<th></th><th>Contenido</th></tr></thead><tbody>"
         + "".join(rows)
         + "</tbody></table>"
     )
 
 
-def _file_model(path: str, label: str, before: str, after: str, language: str) -> dict[str, Any]:
+def _file_model(
+    path: str, label: str, before: str, after: str, language: str
+) -> dict[str, Any]:
     before_lines = _lines(before)
     after_lines = _lines(after)
     matcher = difflib.SequenceMatcher(None, before_lines, after_lines, autojunk=False)
-    added = sum(new_end - new_start for tag, _old_start, _old_end, new_start, new_end in matcher.get_opcodes() if tag in {"insert", "replace"})
-    removed = sum(old_end - old_start for tag, old_start, old_end, _new_start, _new_end in matcher.get_opcodes() if tag in {"delete", "replace"})
+    added = sum(
+        new_end - new_start
+        for tag, _old_start, _old_end, new_start, new_end in matcher.get_opcodes()
+        if tag in {"insert", "replace"}
+    )
+    removed = sum(
+        old_end - old_start
+        for tag, old_start, old_end, _new_start, _new_end in matcher.get_opcodes()
+        if tag in {"delete", "replace"}
+    )
     return {
         "path": path,
         "label": label,
@@ -72,8 +105,14 @@ def _file_model(path: str, label: str, before: str, after: str, language: str) -
 
 
 def _notebook_files(before: bytes, after: bytes) -> list[dict[str, Any]]:
-    before_cells = {index: (cell_type, language, source) for index, cell_type, language, source in extract_notebook_cells(before)}
-    after_cells = {index: (cell_type, language, source) for index, cell_type, language, source in extract_notebook_cells(after)}
+    before_cells = {
+        index: (cell_type, language, source)
+        for index, cell_type, language, source in extract_notebook_cells(before)
+    }
+    after_cells = {
+        index: (cell_type, language, source)
+        for index, cell_type, language, source in extract_notebook_cells(after)
+    }
     files: list[dict[str, Any]] = []
     for index in sorted(set(before_cells) | set(after_cells)):
         old = before_cells.get(index, ("code", "python", ""))
@@ -97,7 +136,9 @@ def _public_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
     return {
         "task_id": manifest.get("task_id"),
         "mode": manifest.get("mode"),
-        "workflow_state": manifest.get("workflow_state") or manifest.get("validation_status") or "draft",
+        "workflow_state": manifest.get("workflow_state")
+        or manifest.get("validation_status")
+        or "draft",
         "validation_status": manifest.get("validation_status", "pending"),
         "baseline_sha256": manifest.get("baseline_sha256"),
         "proposed_sha256": manifest.get("proposed_sha256"),
@@ -121,10 +162,16 @@ def _read_sample_receipt(task: Path) -> dict[str, Any] | None:
         value = json.loads(receipt_path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return {"ok": False, "errors": ["No se pudo leer el comprobante de muestra"]}
-    return value if isinstance(value, dict) else {"ok": False, "errors": ["El comprobante de muestra no es válido"]}
+    return (
+        value
+        if isinstance(value, dict)
+        else {"ok": False, "errors": ["El comprobante de muestra no es válido"]}
+    )
 
 
-def _public_sample(sample: dict[str, Any] | None, *, current_sha256: str = "") -> dict[str, Any]:
+def _public_sample(
+    sample: dict[str, Any] | None, *, current_sha256: str = ""
+) -> dict[str, Any]:
     """Project a sample receipt into safe, row-free review metadata."""
     if not sample:
         return {
@@ -148,11 +195,21 @@ def _public_sample(sample: dict[str, Any] | None, *, current_sha256: str = "") -
         row_count = 0
     raw_limit = sample.get("limit")
     try:
-        limit = max(1, min(int(raw_limit), 5)) if isinstance(raw_limit, (int, str)) else None
+        limit = (
+            max(1, min(int(raw_limit), 5))
+            if isinstance(raw_limit, (int, str))
+            else None
+        )
     except (TypeError, ValueError):
         limit = None
-    columns = [str(column)[:128] for column in (sample.get("columns") or []) if str(column).strip()][:25]
-    errors = [str(error)[:256] for error in (sample.get("errors") or []) if str(error).strip()][:5]
+    columns = [
+        str(column)[:128]
+        for column in (sample.get("columns") or [])
+        if str(column).strip()
+    ][:25]
+    errors = [
+        str(error)[:256] for error in (sample.get("errors") or []) if str(error).strip()
+    ][:5]
     if stale:
         errors = ["El contenido cambió después de ejecutar la muestra", *errors][:5]
     return {
@@ -181,7 +238,12 @@ def _workflow_steps(
     published = state == "published"
     approved = state == "approved"
     validation_done = status == "ready" or approved or published
-    validation_error = status in {"blocked_vpc", "blocked_permission", "failed", "changes_required"}
+    validation_error = status in {
+        "blocked_vpc",
+        "blocked_permission",
+        "failed",
+        "changes_required",
+    }
     publication_description = (
         "Commit sobre el repositorio original"
         if mode == "update"
@@ -199,7 +261,9 @@ def _workflow_steps(
         {
             "key": "validate",
             "label": "Validación",
-            "status": "error" if validation_error else ("done" if validation_done else "current"),
+            "status": "error"
+            if validation_error
+            else ("done" if validation_done else "current"),
             "description": (
                 "Prevalidación local"
                 if dry_run.get("skipped")
@@ -214,10 +278,14 @@ def _workflow_steps(
         sample_status = str(sample.get("status") or "pending")
         if sample_status == "ok":
             sample_step_status = "done"
-            sample_description = f"{sample.get('row_count', 0)} filas · Workbench · solo lectura"
+            sample_description = (
+                f"{sample.get('row_count', 0)} filas · Workbench · solo lectura"
+            )
         elif sample_status in {"failed", "stale"}:
             sample_step_status = "error"
-            sample_description = "La muestra no es vigente; ejecuta otra con digest aprobado"
+            sample_description = (
+                "La muestra no es vigente; ejecuta otra con digest aprobado"
+            )
         elif validation_error:
             sample_step_status = "locked"
             sample_description = "Disponible después de una validación correcta"
@@ -240,7 +308,9 @@ def _workflow_steps(
             {
                 "key": "approve",
                 "label": "Aprobación",
-                "status": "done" if approved or published else ("current" if validation_done else "locked"),
+                "status": "done"
+                if approved or published
+                else ("current" if validation_done else "locked"),
                 "description": "Digest vigente en la conversación",
             },
             {
@@ -268,7 +338,15 @@ def build_review_model(
         files = _notebook_files(before, after)
     else:
         filename = str(manifest.get("filename") or "content.sql")
-        files = [_file_model(filename, filename, before.decode("utf-8", errors="replace"), after.decode("utf-8", errors="replace"), "sql")]
+        files = [
+            _file_model(
+                filename,
+                filename,
+                before.decode("utf-8", errors="replace"),
+                after.decode("utf-8", errors="replace"),
+                "sql",
+            )
+        ]
     changed_files = [file for file in files if file["changed"]]
     summary = {
         "files_changed": len(changed_files),
@@ -282,10 +360,16 @@ def build_review_model(
         section = displayed_validation.get(section_name)
         if isinstance(section, dict):
             section_copy = dict(section)
-            section_copy["errors"] = [redact_message(item) for item in section.get("errors") or []]
+            section_copy["errors"] = [
+                redact_message(item) for item in section.get("errors") or []
+            ]
             displayed_validation[section_name] = section_copy
-    displayed_validation["errors"] = [redact_message(item) for item in validation.get("errors") or []]
-    validated_sha256 = validation.get("content_sha256") or manifest.get("proposed_sha256")
+    displayed_validation["errors"] = [
+        redact_message(item) for item in validation.get("errors") or []
+    ]
+    validated_sha256 = validation.get("content_sha256") or manifest.get(
+        "proposed_sha256"
+    )
     if validated_sha256 and validated_sha256 != current_sha256:
         displayed_validation["stale"] = True
         displayed_validation["publishable"] = False
@@ -314,26 +398,34 @@ def build_review_model(
         "preferences": {
             "review_theme": str((preferences or {}).get("review_theme") or "dark"),
             "review_mode": str((preferences or {}).get("review_mode") or "unified"),
-            "review_only_changes": bool((preferences or {}).get("review_only_changes", True)),
-            "review_context_lines": max(0, min(int((preferences or {}).get("review_context_lines", 3)), 20)),
+            "review_only_changes": bool(
+                (preferences or {}).get("review_only_changes", True)
+            ),
+            "review_context_lines": max(
+                0, min(int((preferences or {}).get("review_context_lines", 3)), 20)
+            ),
         },
     }
     if diagnostic:
         model["diagnostic"] = diagnostic
-    canonical = json.dumps(model, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    canonical = json.dumps(
+        model, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
     model["revision"] = hashlib.sha256(canonical).hexdigest()
     return model
 
 
 def _validation_cards(validation: dict[str, Any]) -> str:
-    status = html.escape("stale" if validation.get("stale") else str(validation.get("status", "pending")))
+    status = html.escape(
+        "stale" if validation.get("stale") else str(validation.get("status", "pending"))
+    )
     method = html.escape(str(validation.get("method", "pending")))
     publishable = "sí" if validation.get("publishable") else "no"
     error_kind = html.escape(str(validation.get("error_kind", "")))
     extra = f'<span class="error-kind">{error_kind}</span>' if error_kind else ""
     return (
         f'<div class="validation-card"><strong>{status}</strong>'
-        f'<span>Método: {method}</span><span>Publicable: {publishable}</span>{extra}</div>'
+        f"<span>Método: {method}</span><span>Publicable: {publishable}</span>{extra}</div>"
     )
 
 
@@ -350,7 +442,9 @@ def _file_html(file: dict[str, Any], *, context_lines: int = 3) -> str:
     )
     if not file["changed"]:
         split = '<p class="unchanged">Sin cambios.</p>'
-    anchor = "change-" + hashlib.sha256(str(file["path"]).encode("utf-8")).hexdigest()[:12]
+    anchor = (
+        "change-" + hashlib.sha256(str(file["path"]).encode("utf-8")).hexdigest()[:12]
+    )
     return (
         f'<section class="file-block" id="{anchor}" data-changed="{str(bool(file["changed"])).lower()}">'
         f'<header><div class="file-title"><strong>{html.escape(str(file["label"]))}</strong>'
@@ -359,7 +453,7 @@ def _file_html(file: dict[str, Any], *, context_lines: int = 3) -> str:
         f'<span class="added">+{file["added"]}</span> '
         f'<span class="removed">−{file["removed"]}</span></span></header>'
         f'<div class="split-view">{split}</div>'
-        f'<div class="unified-view">{_unified_table(before, after)}</div>'
+        f'<div class="unified-view">{_unified_table(before, after, context_lines=context_lines)}</div>'
         '</section>'
     )
 
@@ -383,22 +477,28 @@ def _render_modern_review(model: dict[str, Any], *, live: bool = False) -> str:
     resource = manifest.get("resource") or {}
     summary = model.get("summary") or {}
     validation = model.get("validation") or {}
-    sample = _public_sample(model.get("sample") if isinstance(model.get("sample"), dict) else None)
+    sample = _public_sample(
+        model.get("sample") if isinstance(model.get("sample"), dict) else None
+    )
     dry_run = validation.get("dry_run") or {}
     fragments = dry_run.get("fragments") or []
     passed_fragments = sum(1 for fragment in fragments if fragment.get("dry_run_ok"))
     warnings = list(dry_run.get("warnings") or [])
     status = str(manifest.get("workflow_state") or "draft")
     state_class = (
-        "error" if status in {"blocked_vpc", "blocked_permission", "failed", "changes_required"}
-        else "success" if status in {"ready", "approved", "published"}
+        "error"
+        if status in {"blocked_vpc", "blocked_permission", "failed", "changes_required"}
+        else "success"
+        if status in {"ready", "approved", "published"}
         else "current"
     )
     backend = str(validation.get("backend") or "local")
     backend_label = "Workbench" if backend == "workbench" else "Cloud Shell"
     digest = str(manifest.get("approval_digest") or "")
     digest_display = digest[:16] + "…" if len(digest) > 16 else (digest or "pendiente")
-    display_name = str(resource.get("display_name") or resource.get("name") or "Recurso")
+    display_name = str(
+        resource.get("display_name") or resource.get("name") or "Recurso"
+    )
     location = str(resource.get("location") or "—")
     project = str(resource.get("project") or "—")
     workflow_html = "".join(
@@ -417,7 +517,11 @@ def _render_modern_review(model: dict[str, Any], *, live: bool = False) -> str:
     render_model = dict(model)
     render_model["sample"] = sample
     model_json = json.dumps(render_model, ensure_ascii=False, separators=(",", ":"))
-    model_json = model_json.replace("<", "\\u003c").replace(">", "\\u003e").replace("&", "\\u0026")
+    model_json = (
+        model_json.replace("<", "\\u003c")
+        .replace(">", "\\u003e")
+        .replace("&", "\\u0026")
+    )
     validation_state = html.escape(str(validation.get("status") or status))
     validation_message = (
         "La estimación supera el límite configurado; el dry-run sigue siendo válido."
@@ -439,7 +543,10 @@ def _render_modern_review(model: dict[str, Any], *, live: bool = False) -> str:
         if digest
         else ""
     )
-    live_script = "" if not live else """
+    live_script = (
+        ""
+        if not live
+        else """
 const initialRevision = document.body.dataset.revision;
 setInterval(async () => {
   try {
@@ -449,7 +556,12 @@ setInterval(async () => {
   } catch (_) {}
 }, 2000);
 """
-    live_label = "Actualización automática activa" if live else "Snapshot local; usa --serve para actualizar"
+    )
+    live_label = (
+        "Actualización automática activa"
+        if live
+        else "Snapshot local; usa --serve para actualizar"
+    )
     css = """
 :root {
   color-scheme: light;
@@ -574,7 +686,9 @@ const savedScroll = window.localStorage.getItem(taskKey + "-scroll");
 if (savedScroll) window.scrollTo(0, Number(savedScroll));
 applyView();
 """
-    validation_json = html.escape(json.dumps(validation, ensure_ascii=False, indent=2, sort_keys=True))
+    validation_json = html.escape(
+        json.dumps(validation, ensure_ascii=False, indent=2, sort_keys=True)
+    )
     warning_class = " warning" if warnings else ""
     return f"""<!doctype html>
 <html lang="es">
@@ -613,11 +727,33 @@ def _render_minimal_dark_review(model: dict[str, Any], *, live: bool = False) ->
     errors = list(validation.get("errors") or [])
     for section in (validation.get("static") or {}, validation.get("dry_run") or {}):
         errors.extend(str(item) for item in section.get("errors") or [])
-    has_error = status in {"blocked_vpc", "blocked_permission", "failed", "changes_required", "conflict"} or bool(errors)
-    state_class = "error" if has_error else "success" if status in {"ready", "approved", "published"} else "neutral"
-    display_name = str(resource.get("display_name") or resource.get("name") or "Recurso")
+    has_error = status in {
+        "blocked_vpc",
+        "blocked_permission",
+        "failed",
+        "changes_required",
+        "conflict",
+    } or bool(errors)
+    state_class = (
+        "error"
+        if has_error
+        else "success"
+        if status in {"ready", "approved", "published"}
+        else "neutral"
+    )
+    display_name = str(
+        resource.get("display_name") or resource.get("name") or "Recurso"
+    )
     resource_kind = str(resource.get("kind") or "recurso")
-    metadata = " · ".join(item for item in (resource_kind, str(resource.get("project") or ""), str(resource.get("location") or "")) if item)
+    metadata = " · ".join(
+        item
+        for item in (
+            resource_kind,
+            str(resource.get("project") or ""),
+            str(resource.get("location") or ""),
+        )
+        if item
+    )
     digest = str(manifest.get("approval_digest") or "")
     digest_button = (
         f'<button class="button subtle" id="copy-digest" type="button" data-digest="{html.escape(digest)}">Copiar digest</button>'
@@ -625,23 +761,39 @@ def _render_minimal_dark_review(model: dict[str, Any], *, live: bool = False) ->
         else ""
     )
     diagnostic = model.get("diagnostic") or validation.get("diagnostic")
-    diagnostic_payload = diagnostic if isinstance(diagnostic, dict) else {
-        "category": validation.get("error_kind"),
-        "message": redact_message(errors[0] if errors else "La validación no fue publicable"),
-    }
-    diagnostic_json = json.dumps(diagnostic_payload, ensure_ascii=False, separators=(",", ":"))
+    diagnostic_payload = (
+        diagnostic
+        if isinstance(diagnostic, dict)
+        else {
+            "category": validation.get("error_kind"),
+            "message": redact_message(
+                errors[0] if errors else "La validación no fue publicable"
+            ),
+        }
+    )
+    diagnostic_json = json.dumps(
+        diagnostic_payload, ensure_ascii=False, separators=(",", ":")
+    )
     theme = html.escape(str(preferences.get("review_theme") or "dark"))
     default_mode = html.escape(str(preferences.get("review_mode") or "unified"))
-    default_filter = "changed" if preferences.get("review_only_changes", True) else "all"
+    default_filter = (
+        "changed" if preferences.get("review_only_changes", True) else "all"
+    )
     context_lines = max(0, min(int(preferences.get("review_context_lines", 3)), 20))
     error_panel = ""
     if has_error:
-        error_message = redact_message(errors[0] if errors else "La validación no fue publicable")
+        error_message = redact_message(
+            errors[0] if errors else "La validación no fue publicable"
+        )
         diagnostic_id = str(diagnostic_payload.get("error_id") or "")
-        diagnostic_note = f'<p>ID de diagnóstico: <code>{html.escape(diagnostic_id)}</code></p>' if diagnostic_id else ""
+        diagnostic_note = (
+            f"<p>ID de diagnóstico: <code>{html.escape(diagnostic_id)}</code></p>"
+            if diagnostic_id
+            else ""
+        )
         error_panel = (
             f'<section class="error-panel" aria-live="assertive"><div><strong>{html.escape(error_message)}</strong>'
-            f'<p>Revisa el diagnóstico antes de volver a validar.</p>{diagnostic_note}</div>'
+            f"<p>Revisa el diagnóstico antes de volver a validar.</p>{diagnostic_note}</div>"
             f'<button class="button subtle" id="copy-diagnostic" type="button" data-diagnostic="{html.escape(diagnostic_json)}">Copiar diagnóstico</button></section>'
         )
     changed_files = [file for file in files if file.get("changed")]
@@ -652,13 +804,19 @@ def _render_minimal_dark_review(model: dict[str, Any], *, live: bool = False) ->
             for file in changed_files
         )
         selector = f'<label class="cell-selector">Ir a cambio <select id="change-select">{options}</select></label>'
-    files_html = "".join(_file_html(file, context_lines=context_lines) for file in files)
+    files_html = "".join(
+        _file_html(file, context_lines=context_lines) for file in files
+    )
     validation_message = (
         "La validación terminó correctamente."
         if validation.get("ok")
         else "La validación necesita atención."
     )
-    content_note = "consulta SQL" if resource_kind in {"shared_query", "scheduled_query"} else "contenido del notebook"
+    content_note = (
+        "consulta SQL"
+        if resource_kind in {"shared_query", "scheduled_query"}
+        else "contenido del notebook"
+    )
     dry_run = validation.get("dry_run") or {}
     # The HTML already contains the rendered diff. Do not duplicate complete
     # before/after SQL in the embedded model: this keeps large previews small
@@ -669,11 +827,19 @@ def _render_minimal_dark_review(model: dict[str, Any], *, live: bool = False) ->
         for file in files
     ]
     model_json = json.dumps(public_model, ensure_ascii=False, separators=(",", ":"))
-    model_json = model_json.replace("<", "\\u003c").replace(">", "\\u003e").replace("&", "\\u0026")
-    live_script = "" if not live else """
+    model_json = (
+        model_json.replace("<", "\\u003c")
+        .replace(">", "\\u003e")
+        .replace("&", "\\u0026")
+    )
+    live_script = (
+        ""
+        if not live
+        else """
 const initialRevision = document.body.dataset.revision;
 setInterval(async () => { try { const response = await fetch('/api/review', {cache: 'no-store'}); const next = await response.json(); if (next.revision !== initialRevision) window.location.reload(); } catch (_) {} }, 2000);
 """
+    )
     css = """
 :root { color-scheme: dark; --bg:#0f172a; --surface:#172033; --surface-2:#1e293b; --text:#f8fafc; --muted:#a8b3c7; --faint:#71809a; --border:#334155; --blue:#60a5fa; --green:#4ade80; --green-bg:#123c2a; --red:#fb7185; --red-bg:#431d2a; --yellow:#facc15; --radius:10px; }
 * { box-sizing:border-box; } html { scroll-behavior:smooth; } body { margin:0; background:var(--bg); color:var(--text); font:14px/1.5 system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; } button,select { font:inherit; } a { color:var(--blue); } .skip-link { position:absolute; left:12px; top:-40px; padding:8px 10px; background:var(--blue); color:#07111f; border-radius:6px; z-index:30; } .skip-link:focus { top:12px; }
@@ -681,7 +847,7 @@ setInterval(async () => { try { const response = await fetch('/api/review', {cac
 main { max-width:1400px; margin:0 auto; padding:22px clamp(16px,4vw,48px) 56px; } .validation-panel,.error-panel { display:flex; align-items:center; justify-content:space-between; gap:16px; padding:14px 16px; margin-bottom:14px; border:1px solid var(--border); border-radius:var(--radius); background:var(--surface); } .validation-panel h2 { margin:0; font-size:15px; } .validation-panel p,.error-panel p { margin:3px 0 0; color:var(--muted); font-size:13px; } .validation-status { color:var(--green); font-family:ui-monospace,SFMono-Regular,Consolas,monospace; } .error-panel { border-color:#8d334b; background:var(--red-bg); } .error-panel strong { color:#fecdd3; } .error-panel p { color:#fda4af; }
 .toolbar { display:flex; flex-wrap:wrap; align-items:center; gap:8px; margin-bottom:10px; } .button { min-height:36px; padding:7px 11px; border:1px solid var(--border); border-radius:7px; background:var(--surface-2); color:var(--text); cursor:pointer; } .button:hover { border-color:var(--blue); } .button:focus-visible,select:focus-visible,input:focus-visible { outline:2px solid var(--blue); outline-offset:2px; } .button.active { border-color:var(--blue); background:#244263; } .subtle { color:var(--muted); } .toolbar-spacer { flex:1; } .filter-label,.cell-selector { display:inline-flex; align-items:center; gap:7px; color:var(--muted); } input { accent-color:var(--blue); } select { min-height:34px; padding:5px 8px; border:1px solid var(--border); border-radius:7px; background:var(--surface-2); color:var(--text); }
 .file-block { overflow:hidden; margin:0 0 16px; border:1px solid var(--border); border-radius:var(--radius); background:var(--surface); scroll-margin-top:16px; } .file-block header { display:flex; align-items:center; justify-content:space-between; gap:12px; padding:11px 14px; border-bottom:1px solid var(--border); background:var(--surface-2); } .file-title strong,.file-title small { display:block; } .file-title small { margin-top:2px; color:var(--faint); font:12px ui-monospace,SFMono-Regular,Consolas,monospace; } .counts { white-space:nowrap; font:12px ui-monospace,SFMono-Regular,Consolas,monospace; }
-table.diff,table.unified { width:100%; border-collapse:collapse; table-layout:fixed; font:13px/1.55 ui-monospace,SFMono-Regular,Consolas,monospace; } table.diff td,table.diff th,table.unified td,table.unified th { border:1px solid var(--border); padding:4px 9px; vertical-align:top; white-space:pre-wrap; overflow-wrap:anywhere; } table.diff th,table.unified th { color:var(--muted); background:var(--surface-2); text-align:left; font:12px system-ui,sans-serif; } table.diff .diff_add,table.unified .add { background:var(--green-bg); } table.diff .diff_sub,table.unified .sub { background:var(--red-bg); } table.diff .diff_chg { background:#4a3b14; } table.unified td:nth-child(1),table.unified td:nth-child(2) { width:64px; color:var(--faint); text-align:right; user-select:none; } .split-view { display:none; overflow:auto; } .unified-view { overflow:auto; } body[data-mode="split"] .split-view { display:block; } body[data-mode="split"] .unified-view { display:none; } body[data-filter="changed"] .file-block[data-changed="false"] { display:none; } .empty-filter { display:none; padding:18px; border:1px dashed var(--border); border-radius:var(--radius); color:var(--muted); text-align:center; } body[data-filter="changed"] .empty-filter { display:block; } body[data-filter="changed"] .file-block[data-changed="true"] ~ .empty-filter { display:none; }
+table.diff,table.unified { width:100%; border-collapse:collapse; table-layout:fixed; font:13px/1.55 ui-monospace,SFMono-Regular,Consolas,monospace; } table.diff td,table.diff th,table.unified td,table.unified th { border:1px solid var(--border); padding:4px 9px; vertical-align:top; white-space:pre-wrap; overflow-wrap:anywhere; } table.diff th,table.unified th { color:var(--muted); background:var(--surface-2); text-align:left; font:12px system-ui,sans-serif; } table.diff .diff_add,table.unified .add { background:var(--green-bg); } table.diff .diff_sub,table.unified .sub { background:var(--red-bg); } table.diff .diff_chg { background:#4a3b14; } table.unified td:nth-child(1),table.unified td:nth-child(2) { width:64px; color:var(--faint); text-align:right; user-select:none; } table.unified .fold td { color:var(--faint); background:var(--surface-2); text-align:center; font:12px system-ui,sans-serif; } .split-view { display:none; overflow:auto; } .unified-view { overflow:auto; } body[data-mode="split"] .split-view { display:block; } body[data-mode="split"] .unified-view { display:none; } body[data-filter="changed"] .file-block[data-changed="false"] { display:none; } body[data-filter="changed"] table.unified .ctx,body[data-filter="changed"] table.unified .fold { display:none; } .empty-filter { display:none; padding:18px; border:1px dashed var(--border); border-radius:var(--radius); color:var(--muted); text-align:center; } body[data-filter="changed"] .empty-filter { display:block; } body[data-filter="changed"] .file-block[data-changed="true"] ~ .empty-filter { display:none; }
 details { margin-top:14px; border:1px solid var(--border); border-radius:var(--radius); background:var(--surface); } summary { padding:11px 14px; cursor:pointer; color:var(--muted); } pre.validation { max-height:360px; overflow:auto; margin:0; padding:14px; border-top:1px solid var(--border); color:var(--muted); background:#111a2b; font:12px/1.5 ui-monospace,SFMono-Regular,Consolas,monospace; } .live-note { color:var(--faint); font-size:12px; } .sr-only { position:absolute; width:1px; height:1px; padding:0; margin:-1px; overflow:hidden; clip:rect(0,0,0,0); white-space:nowrap; border:0; }
 body[data-theme="light"] { --bg:#f8fafc; --surface:#fff; --surface-2:#f1f5f9; --text:#0f172a; --muted:#475569; --faint:#64748b; --border:#cbd5e1; --green-bg:#dcfce7; --red-bg:#fee2e2; } @media (prefers-color-scheme: light) { body[data-theme="system"] { --bg:#f8fafc; --surface:#fff; --surface-2:#f1f5f9; --text:#0f172a; --muted:#475569; --faint:#64748b; --border:#cbd5e1; --green-bg:#dcfce7; --red-bg:#fee2e2; } } @media (max-width:700px) { .identity,.validation-panel,.error-panel { display:block; } .state { display:inline-block; margin-top:10px; } .validation-panel .button,.error-panel .button { margin-top:10px; } .toolbar-spacer { display:none; } table.diff,table.unified { min-width:720px; } }
 """
@@ -698,7 +864,9 @@ document.getElementById("copy-diagnostic")?.addEventListener("click", async even
 document.getElementById("change-select")?.addEventListener("change", event => document.getElementById(event.target.value)?.scrollIntoView({{behavior:"smooth", block:"start"}}));
 applyView();
 """
-    validation_json = html.escape(json.dumps(validation, ensure_ascii=False, indent=2, sort_keys=True))
+    validation_json = html.escape(
+        json.dumps(validation, ensure_ascii=False, indent=2, sort_keys=True)
+    )
     return f"""<!doctype html>
 <html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>QueryFlow · revisión</title><style>{css}</style></head>
 <body data-theme="{theme}" data-mode="{default_mode}" data-filter="{default_filter}" data-revision="{html.escape(str(model.get('revision', '')))}" data-task="{html.escape(str(manifest.get('task_id', 'task')))}">
@@ -718,18 +886,36 @@ def render_review_html(before: str, after: str, validation: dict[str, Any]) -> s
         "workflow_state": validation.get("status", "pending"),
         "resource": {"kind": "shared_query", "display_name": "SQL", "location": ""},
     }
-    model = build_review_model(manifest, validation, before.encode("utf-8"), after.encode("utf-8"))
+    model = build_review_model(
+        manifest, validation, before.encode("utf-8"), after.encode("utf-8")
+    )
     return render_review_model(model)
 
 
-def write_review_html(task: Path, before: bytes | str, after: bytes | str, validation: dict[str, Any], preferences: dict[str, Any] | None = None) -> Path:
+def write_review_html(
+    task: Path,
+    before: bytes | str,
+    after: bytes | str,
+    validation: dict[str, Any],
+    preferences: dict[str, Any] | None = None,
+) -> Path:
     manifest = read_manifest(task)
     before_bytes = before.encode("utf-8") if isinstance(before, str) else before
     after_bytes = after.encode("utf-8") if isinstance(after, str) else after
     target = task / "review.html"
     diagnostic = read_diagnostic(task)
     target.write_text(
-        render_review_model(build_review_model(manifest, validation, before_bytes, after_bytes, _read_sample_receipt(task), preferences, diagnostic.to_dict() if diagnostic else None)),
+        render_review_model(
+            build_review_model(
+                manifest,
+                validation,
+                before_bytes,
+                after_bytes,
+                _read_sample_receipt(task),
+                preferences,
+                diagnostic.to_dict() if diagnostic else None,
+            )
+        ),
         encoding="utf-8",
     )
     return target

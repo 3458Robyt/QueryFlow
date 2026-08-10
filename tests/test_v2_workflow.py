@@ -199,6 +199,8 @@ class V2WorkflowTests(unittest.TestCase):
         )
         html = render_review_model(model)
         self.assertNotIn("SQL_REDACTED", html)
+        self.assertIn("líneas de contexto ocultas", html)
+        self.assertIn("table.unified .ctx", html)
         self.assertLess(len(html), 100_000)
 
     def test_v1_configuration_and_task_state_upgrade_without_losing_values(self):
