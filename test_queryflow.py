@@ -736,7 +736,11 @@ class ReviewTests(unittest.TestCase):
             thread.start()
             base = f"http://127.0.0.1:{server.server_address[1]}"
             try:
-                page = urlopen(base + "/review.html").read().decode("utf-8")
+                page_response = urlopen(base + "/review.html")
+                page = page_response.read().decode("utf-8")
+                self.assertEqual("nosniff", page_response.headers["X-Content-Type-Options"])
+                self.assertEqual("DENY", page_response.headers["X-Frame-Options"])
+                self.assertIn("default-src 'none'", page_response.headers["Content-Security-Policy"])
                 api = json.loads(urlopen(base + "/api/review").read())
                 self.assertIn("diff_add", page)
                 self.assertEqual(1, api["summary"]["files_changed"])
