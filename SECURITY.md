@@ -1,7 +1,18 @@
-# Security policy
+# Política de seguridad
 
-QueryFlow is a guardrail and review workflow, not a replacement for Google Cloud IAM or VPC Service Controls. Keep source and destination access limited in GCP and use a team policy that narrows the local profile.
+QueryFlow es una capa de guardrails y revisión; no reemplaza IAM ni VPC Service
+Controls. Mantén limitado el acceso de origen/destino en GCP y usa perfiles
+locales que reduzcan las allowlists.
 
-Report security issues privately through the repository's GitHub security reporting flow. Do not include credentials, tokens, query results or customer data in an issue.
+Los diagnósticos conservan un `error_id`, categoría, etapa, recuperación y
+identificadores de proveedor, pero no tokens, filas ni SQL completo. La
+publicación requiere un digest exacto, auditoría y lectura posterior. La
+excepción estática está deshabilitada por defecto y nunca autoriza ejecutar
+SQL.
 
-The project intentionally excludes migration dictionaries, route-rewrite scripts, notebooks, task workspaces and audit data from public releases.
+Reporta problemas de seguridad por el flujo privado de GitHub. No incluyas
+credenciales, tokens, resultados ni datos de clientes en un issue.
+
+El proyecto excluye intencionalmente diccionarios de migración, scripts de
+reescritura de rutas, notebooks operativos, tareas y auditorías de las
+publicaciones públicas.

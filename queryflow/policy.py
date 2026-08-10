@@ -45,6 +45,7 @@ class Policy:
     allow_delete: bool = False
     allow_scheduled_queries: bool = False
     allow_update_existing: bool = False
+    allow_static_exception: bool = False
     allowed_resource_kinds: tuple[str, ...] = ("notebook", "shared_query")
     allowed_source_projects: tuple[str, ...] = ()
     allowed_destination_projects: tuple[str, ...] = ()
@@ -85,6 +86,7 @@ class Policy:
             allow_delete=bool(raw.get("allow_delete", base.allow_delete)),
             allow_scheduled_queries=bool(raw.get("allow_scheduled_queries", base.allow_scheduled_queries)),
             allow_update_existing=bool(raw.get("allow_update_existing", base.allow_update_existing)),
+            allow_static_exception=bool(raw.get("allow_static_exception", base.allow_static_exception)),
             allowed_resource_kinds=allowed_kinds,
             allowed_source_projects=_string_tuple(raw.get("allowed_source_projects"), base.allowed_source_projects),
             allowed_destination_projects=_string_tuple(
@@ -111,6 +113,7 @@ class Policy:
             "allow_delete": self.allow_delete,
             "allow_scheduled_queries": self.allow_scheduled_queries,
             "allow_update_existing": self.allow_update_existing,
+            "allow_static_exception": self.allow_static_exception,
             "allowed_resource_kinds": list(self.allowed_resource_kinds),
             "allowed_source_projects": list(self.allowed_source_projects),
             "allowed_destination_projects": list(self.allowed_destination_projects),

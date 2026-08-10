@@ -10,7 +10,7 @@ publica después de aprobar un digest exacto.
 Desde Cloud Shell:
 
 ```bash
-uvx --from git+https://github.com/3458Robyt/QueryFlow.git@v0.1.0 queryflow install
+uvx --from git+https://github.com/3458Robyt/QueryFlow.git@v0.2.0-beta.1 queryflow install
 queryflow init
 ```
 
@@ -19,6 +19,8 @@ Reinicia Codex después de instalar el plugin. Comprueba el entorno:
 ```bash
 queryflow version --json
 queryflow doctor --json
+# Diagnóstico remoto opcional, siempre no mutante:
+queryflow doctor --probe-remote --json
 ```
 
 La identidad se mantiene en gcloud. No pegues tokens en la configuración, en
@@ -109,6 +111,19 @@ El analista debe verificar las líneas verdes agregadas, rojas eliminadas,
 archivos/celdas, estado de validación, advertencias y digest. El Web Preview
 es de solo lectura.
 
+### Estado y diagnósticos
+
+Para seguir el trabajo sin inspeccionar archivos internos:
+
+```bash
+queryflow status --task TASK --json
+queryflow diagnose --task TASK --format markdown --output diagnostic.md
+```
+
+Si el error es de VPC o permisos, comparte el `error_id`, la categoría, la
+etapa, el proyecto/ubicación y el identificador VPC que aparezca. Nunca
+compartas tokens, filas ni el SQL completo.
+
 ## 5. Muestra opcional
 
 La muestra no es automática. El agente primero muestra el digest de ejecución y
@@ -141,6 +156,23 @@ queryflow publish --task TASK \
 El piloto crea una copia nueva, comprueba el destino permitido, archiva la
 auditoría y verifica la lectura posterior. No elimina, no habilita schedules y
 no actualiza el recurso original.
+
+### Excepción estática controlada
+
+Solo el perfil `team` puede preparar una excepción y debe tener
+`allow_static_exception = true` en una configuración revisada. Se usa cuando
+la sintaxis local es correcta, pero el dry-run remoto está temporalmente
+bloqueado. Requiere una razón y referencia aprobables:
+
+```bash
+queryflow exception prepare --task TASK \
+  --reason "Bloqueo VPC documentado" --reference SEC-1234 \
+  --config ~/.config/queryflow/config.toml --json
+```
+
+El agente muestra el digest de excepción y espera una aprobación explícita.
+La publicación con ese digest solo guarda el código y mantiene las
+comprobaciones de concurrencia, política, auditoría y lectura posterior.
 
 ## 7. Qué debe recibir el analista
 

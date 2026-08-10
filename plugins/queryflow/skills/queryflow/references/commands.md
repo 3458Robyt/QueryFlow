@@ -22,7 +22,8 @@ digest; never abbreviate it when passing it to `sample` or `publish`. Add
 | Command family | Reads local state | Contacts GCP | Can mutate a remote resource |
 | --- | ---: | ---: | ---: |
 | `version`, `config`, `policy` | yes | no | no |
-| `doctor` | yes | no | no |
+| `doctor` | yes | no by default; `--probe-remote` uses read-only gcloud checks | no |
+| `status`, `diagnose` | yes | no | no |
 | `catalog refresh` | yes | yes | no |
 | `catalog search`, `catalog show` | yes | no | no |
 | `start` | yes | only with `--resource` | no |
@@ -30,6 +31,7 @@ digest; never abbreviate it when passing it to `sample` or `publish`. Add
 | `review` | yes | no | no |
 | `sample` | yes | yes, Workbench only | no |
 | `publish` | yes | yes | yes, only after digest approval |
+| `exception prepare` | yes | no | no |
 | `profile --execute` | yes | yes | no, read-only profiling only |
 
 ## Install and configure
@@ -37,7 +39,7 @@ digest; never abbreviate it when passing it to `sample` or `publish`. Add
 Install the CLI and plugin from the same Git reference, then restart Codex:
 
 ```bash
-uvx --from git+https://github.com/3458Robyt/QueryFlow.git@v0.1.0 queryflow install
+uvx --from git+https://github.com/3458Robyt/QueryFlow.git@v0.2.0-beta.1 queryflow install
 queryflow init --profile pilot \
   --source-projects source-project \
   --destination-projects destination-project \
@@ -59,12 +61,24 @@ queryflow config validate --json
 queryflow config list --json
 queryflow config get profiles.pilot.destination_projects --json
 queryflow config set preferences.review_mode unified --json
+queryflow config set preferences.review_theme dark --json
+queryflow config set preferences.review_only_changes true --json
+queryflow config set preferences.review_context_lines 3 --json
 queryflow policy show --config ~/.config/queryflow/config.toml --json
 queryflow policy check --config ~/.config/queryflow/config.toml \
   --operation publish --resource-kind shared_query --mode copy \
   --source-project source-project --destination-project destination-project \
   --location us --json
 ```
+
+For an administrator's non-mutating environment check:
+
+```bash
+queryflow doctor --config ~/.config/queryflow/config.toml --probe-remote --json
+```
+
+This lists required/missing APIs and describes Workbench without enabling an
+API, running SQL, or changing a resource.
 
 `queryflow config set` rejects credential-like keys and values. If a profile is
 invalid, stop before catalog or task operations.
@@ -137,6 +151,14 @@ The preview is read-only. Confirm file/cell counts, green additions, red
 deletions, validation state, and the publication digest before asking for
 approval.
 
+Use the compact state and diagnostic commands after edits or a blocked step:
+
+```bash
+queryflow status --task TASK --json
+queryflow diagnose --task TASK --format json
+queryflow diagnose --task TASK --format markdown --output diagnostic.md
+```
+
 For a sample, use the execution digest produced from the current SQL and limit:
 
 ```bash
@@ -162,6 +184,19 @@ queryflow publish --task TASK --approved-digest DIGEST \
 
 Publishing performs the configured audit and remote read-back. The pilot
 creates a new copy; it does not update or delete an existing resource.
+
+For an approved static exception in the team profile:
+
+```bash
+queryflow exception prepare --task TASK --reason REASON \
+  --reference TICKET --config ~/.config/queryflow/config.toml --json
+queryflow publish --task TASK --approved-exception-digest EXCEPTION_DIGEST \
+  --destination-project destination-project --account analyst@example.com \
+  --config ~/.config/queryflow/config.toml --json
+```
+
+This route never executes SQL and is rejected for syntax, policy, conflict,
+not-found, or integrity failures.
 
 ## Diagnostics and profiling
 

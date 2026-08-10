@@ -10,8 +10,7 @@ import time
 import uuid
 from dataclasses import dataclass
 from http.cookiejar import CookieJar
-from pathlib import Path
-from typing import Any, Callable, Optional, Sequence
+from typing import Any, Optional, Sequence
 from urllib.parse import urlparse
 from urllib.request import HTTPCookieProcessor, Request, build_opener
 

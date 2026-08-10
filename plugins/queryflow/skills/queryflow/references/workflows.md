@@ -23,6 +23,9 @@ Use this path for a notebook or Shared Query already in Google Cloud:
 4. Edit only the task workspace.
 5. Run Workbench validation and open the Web Preview.
 
+Use `queryflow status --task TASK --json` to report the current state and
+`queryflow diagnose --task TASK --format markdown` if validation is blocked.
+
 Do not reconstruct a resource name from a display name, copy a remote file into
 an unrelated directory, or edit the original while the task is open.
 
@@ -89,6 +92,12 @@ convert a pilot copy task into an update task.
 Scheduled queries, route rewriting, dictionary-based migration, deletion, and
 automatic execution are outside this workflow. Explain that boundary instead
 of improvising a parallel path.
+
+If a reviewed team profile explicitly enables the static-exception path, it is
+still a separate approval boundary: prove static syntax first, prepare an
+exception with a reason and ticket, present its independent digest, then use
+`publish --approved-exception-digest`. It only saves code and preserves remote
+head, policy, audit, and read-back checks.
 
 ## Agent handoff
 

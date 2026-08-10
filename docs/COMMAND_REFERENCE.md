@@ -15,6 +15,9 @@ salida vaya a ser procesada por Codex u otra herramienta.
 | `queryflow install` | Instalar CLI y plugin desde GitHub. | GitHub | no |
 | `queryflow self-update` | Actualizar CLI y plugin desde una referencia. | GitHub | no |
 | `queryflow doctor` | Diagnosticar binarios y configuración. | no | no |
+| `queryflow status` | Mostrar el estado seguro de una tarea. | no | no |
+| `queryflow diagnose` | Exportar el diagnóstico seguro de una tarea. | no | no |
+| `queryflow exception prepare` | Preparar una excepción estática controlada. | no | no |
 | `queryflow catalog refresh` | Actualizar inventario de recursos. | sí | no |
 | `queryflow catalog search` | Buscar recursos en el catálogo local. | no | no |
 | `queryflow catalog show` | Mostrar un recurso canónico. | no | no |
@@ -83,8 +86,8 @@ otra combinación de flags.
 Usa `--dry-run` para ver las instrucciones antes de ejecutar cambios locales:
 
 ```bash
-queryflow install --ref v0.1.0 --dry-run --json
-queryflow self-update --ref v0.1.0 --dry-run --json
+queryflow install --ref v0.2.0-beta.1 --dry-run --json
+queryflow self-update --ref v0.2.0-beta.1 --dry-run --json
 ```
 
 Ambos comandos usan la misma referencia para el paquete Python y el plugin.
@@ -163,6 +166,34 @@ queryflow review --task TASK --serve --watch --port 8080
 La interfaz muestra cambios por archivo/celda, líneas añadidas/eliminadas,
 validación, digest y metadatos sin filas.
 
+### `queryflow status`
+
+Resume el estado actual, hashes, validación, digest y diagnóstico de una tarea
+sin exponer el contenido SQL:
+
+```bash
+queryflow status --task TASK --json
+```
+
+Los estados de bloqueo conservan código de salida `2`. El resultado incluye
+`status`, `content_sha256`, `validated_sha256`, `approval_digest` y, si existe,
+el sobre de diagnóstico seguro.
+
+### `queryflow diagnose`
+
+Lee el último fallo de la tarea. El JSON es el formato para Codex y Markdown es
+el formato para enviar al responsable de permisos:
+
+```bash
+queryflow diagnose --task TASK --format json
+queryflow diagnose --task TASK --format markdown --output diagnostic.md
+```
+
+El diagnóstico tiene `error_id`, categoría, etapa, recuperación, si es
+reintentable e identificadores de proveedor como
+`vpcServiceControlsUniqueIdentifier`. No contiene tokens, filas ni SQL
+completo.
+
 ## Muestra y publicación
 
 ### `queryflow sample`
@@ -195,6 +226,26 @@ queryflow publish --task TASK --approved-digest DIGEST \
 En `pilot` crea una copia nueva. La actualización de un recurso existente está
 restringida al perfil `team` y no se habilita mediante un flag aislado.
 
+### `queryflow exception prepare`
+
+Es una ruta controlada para el perfil `team` cuando la validación estática es
+correcta pero el dry-run remoto está bloqueado por una dependencia aprobada.
+Debe estar habilitada explícitamente con `allow_static_exception = true`,
+requiere razón y referencia/ticket, y genera un digest independiente:
+
+```bash
+queryflow exception prepare --task TASK \
+  --reason "Perímetro temporalmente no disponible" \
+  --reference SEC-1234 --config ~/.config/queryflow/config.toml --json
+queryflow publish --task TASK --approved-exception-digest EXCEPTION_DIGEST \
+  --destination-project destination-project --account analyst@example.com \
+  --config ~/.config/queryflow/config.toml --json
+```
+
+La excepción solo guarda el activo de código. No ejecuta SQL, no habilita
+programaciones y no puede saltarse sintaxis inválida, política denegada,
+conflicto remoto, integridad o recurso inexistente.
+
 ## Diagnóstico y perfilado
 
 ### `queryflow doctor`
@@ -204,7 +255,14 @@ configuración y perfil:
 
 ```bash
 queryflow doctor --config ~/.config/queryflow/config.toml --json
+# Añade --probe-remote para consultar APIs habilitadas y describir Workbench.
+queryflow doctor --config ~/.config/queryflow/config.toml --probe-remote --json
 ```
+
+`--probe-remote` solo ejecuta lecturas (`gcloud services list` y `describe`);
+no habilita APIs, no inicia jobs y no cambia recursos. El resultado enumera
+APIs requeridas/faltantes y clasifica el error de conectividad sin copiar la
+respuesta cruda del proveedor.
 
 ### `queryflow profile`
 

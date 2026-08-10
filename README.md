@@ -24,11 +24,11 @@ No pegues tokens en el README, en la configuración ni en una conversación.
 
 ### Instalación
 
-La referencia disponible para el equipo es la rama `feat/queryflow-v010`:
+La beta disponible para el equipo es `v0.2.0-beta.1`:
 
 ```bash
-uvx --from git+https://github.com/3458Robyt/QueryFlow.git@feat/queryflow-v010 \
-  queryflow install --ref feat/queryflow-v010
+uvx --from git+https://github.com/3458Robyt/QueryFlow.git@v0.2.0-beta.1 \
+  queryflow install --ref v0.2.0-beta.1
 queryflow init --profile pilot
 ```
 
@@ -56,6 +56,14 @@ queryflow init --profile pilot \
 queryflow config validate --json
 queryflow doctor --json
 queryflow policy show --json
+```
+
+La revisión usa por defecto tema oscuro, diff unificado y solo cambios. Se
+puede personalizar sin tocar credenciales:
+
+```bash
+queryflow config set preferences.review_theme dark --json
+queryflow config set preferences.review_mode unified --json
 ```
 
 La configuración se guarda en `~/.config/queryflow/config.toml`. Contiene
@@ -96,6 +104,13 @@ queryflow review --task TASK --serve --watch --port 8080
 El preview es de solo lectura y marca en verde las líneas agregadas y en rojo
 las eliminadas. Revisa el SQL, las celdas afectadas, las advertencias, el
 resultado de validación y el digest antes de continuar.
+
+Para conocer el estado o preparar evidencia para permisos:
+
+```bash
+queryflow status --task TASK --json
+queryflow diagnose --task TASK --format markdown --output diagnostic.md
+```
 
 ### 2. Crear una consulta nueva
 
@@ -167,6 +182,9 @@ mutante automáticamente.
   autenticación, Workbench, SQL y digest.
 - [Skill de Codex](plugins/queryflow/skills/queryflow/SKILL.md): instrucciones
   que usa el agente para operar QueryFlow.
+- [Arquitectura y frontera con Gemini](docs/ARCHITECTURE.md).
+- [Guía del administrador GCP](docs/ADMIN_GUIDE.md).
+- [Informe de aceptación beta](docs/BETA_ACCEPTANCE.md).
 - [Seguridad](SECURITY.md) y [contribución](CONTRIBUTING.md).
 
 ## Desarrollo

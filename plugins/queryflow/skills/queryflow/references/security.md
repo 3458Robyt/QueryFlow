@@ -34,6 +34,9 @@ Do not collapse these boundaries to make a failing step pass.
   values.
 - A remote read-back must match the approved content before publication is
   reported as successful.
+- Structured diagnostics use a stable `error_id` and retain only redacted
+  messages, safe task context, recovery guidance, and provider identifiers.
+  They never retain credentials, result rows, or full SQL payloads.
 
 ## Profiles and allowlists
 
@@ -45,6 +48,12 @@ The `team` profile is not a bypass. It is a separately reviewed configuration
 that may permit an existing-resource update only when `allow_update_existing`
 is true and the task has a remote commit base. Keep profiles credential-free;
 gcloud supplies identity and tokens.
+
+`allow_static_exception` is a separate, default-off team setting. An exception
+requires a successful static validation, reason, reference, independent
+digest, and explicit approval. It only authorizes saving a code asset after
+all remaining policy, concurrency, audit, and read-back checks; it never
+authorizes SQL execution or schedule activation.
 
 ## Evidence and retention
 

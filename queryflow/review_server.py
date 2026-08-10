@@ -5,15 +5,16 @@ import os
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 from urllib.parse import urlsplit
 
+from .errors import read_diagnostic
 from .review import _read_sample_receipt, build_review_model, render_review_model
 from .task import baseline_file, preview_notebook_task
 from .workspace import read_manifest
 
 
-def load_review_model(task: Path) -> dict[str, Any]:
+def load_review_model(task: Path, preferences: dict[str, Any] | None = None) -> dict[str, Any]:
     manifest = read_manifest(task)
     filename = str(manifest["filename"])
     before = baseline_file(task, filename)
@@ -26,10 +27,11 @@ def load_review_model(task: Path) -> dict[str, Any]:
         validation = json.loads(validation_path.read_text(encoding="utf-8"))
     else:
         validation = {"status": "pending", "method": "pending", "publishable": False}
-    return build_review_model(manifest, validation, before, after, _read_sample_receipt(task))
+    diagnostic = read_diagnostic(task)
+    return build_review_model(manifest, validation, before, after, _read_sample_receipt(task), preferences, diagnostic.to_dict() if diagnostic else None)
 
 
-def _handler_factory(task: Path) -> type[BaseHTTPRequestHandler]:
+def _handler_factory(task: Path, preferences: dict[str, Any] | None = None) -> type[BaseHTTPRequestHandler]:
     class ReviewHandler(BaseHTTPRequestHandler):
         server_version = "QueryFlowReview/1"
 
@@ -45,7 +47,7 @@ def _handler_factory(task: Path) -> type[BaseHTTPRequestHandler]:
             path = urlsplit(self.path).path
             if path == "/api/review":
                 try:
-                    body = json.dumps(load_review_model(task), ensure_ascii=False).encode("utf-8")
+                    body = json.dumps(load_review_model(task, preferences), ensure_ascii=False).encode("utf-8")
                 except (OSError, ValueError, KeyError, RuntimeError) as error:
                     self._send(
                         json.dumps({"error": str(error)}, ensure_ascii=False).encode("utf-8"),
@@ -57,7 +59,7 @@ def _handler_factory(task: Path) -> type[BaseHTTPRequestHandler]:
                 return
             if path in {"/", "/review.html"}:
                 try:
-                    model = load_review_model(task)
+                    model = load_review_model(task, preferences)
                     body = render_review_model(model, live=True).encode("utf-8")
                 except (OSError, ValueError, KeyError, RuntimeError) as error:
                     self._send(str(error).encode("utf-8"), "text/plain; charset=utf-8", HTTPStatus.INTERNAL_SERVER_ERROR)
@@ -72,8 +74,8 @@ def _handler_factory(task: Path) -> type[BaseHTTPRequestHandler]:
     return ReviewHandler
 
 
-def serve_review(task: Path, port: int) -> tuple[ThreadingHTTPServer, str]:
-    server = ThreadingHTTPServer(("0.0.0.0", port), _handler_factory(task))
+def serve_review(task: Path, port: int, preferences: dict[str, Any] | None = None) -> tuple[ThreadingHTTPServer, str]:
+    server = ThreadingHTTPServer(("0.0.0.0", port), _handler_factory(task, preferences))
     host = os.environ.get("WEB_HOST", "localhost")
     actual_port = int(server.server_address[1])
     return server, f"https://{actual_port}-{host}/review.html"

@@ -167,10 +167,10 @@ def analyze_sql_fragments(raw: bytes) -> SqlExtraction:
                 fragments.append((index, body))
             continue
         try:
-            tree = ast.parse(_without_cell_magics(source))
+            parsed_tree: ast.AST = ast.parse(_without_cell_magics(source))
         except SyntaxError:
             continue
-        python_trees.append((index, tree))
+        python_trees.append((index, parsed_tree))
         python_sources[index] = source
 
     symbols, unresolved = _python_symbol_table([tree for _index, tree in python_trees])

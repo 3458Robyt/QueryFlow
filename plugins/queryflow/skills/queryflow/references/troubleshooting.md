@@ -21,6 +21,8 @@ queryflow doctor --config ~/.config/queryflow/config.toml --json
 gcloud auth list
 queryflow config validate --json
 queryflow policy show --config ~/.config/queryflow/config.toml --json
+queryflow status --task TASK --json
+queryflow diagnose --task TASK --format markdown --output diagnostic.md
 ```
 
 Then classify the failure from the command's `error_kind`, `status`, or exact
@@ -31,7 +33,7 @@ after access is corrected.
 
 | Symptom | Meaning | Safe action |
 | --- | --- | --- |
-| `blocked_vpc` or `VPC Service Controls` | The request crossed an organization perimeter or used the wrong execution boundary. | Capture project, location, Workbench instance, account, and request time for the GCP owner. Retry from the approved Workbench perimeter. |
+| `blocked_vpc` or `VPC Service Controls` | The request crossed an organization perimeter or used the wrong execution boundary. | Capture `error_id`, `vpcServiceControlsUniqueIdentifier`, project, location, Workbench instance, account, and request time for the GCP owner. Retry from the approved Workbench perimeter. |
 | `blocked_permission`, `PERMISSION_DENIED`, or `Access Denied` | The active identity lacks an IAM/Dataform/BigQuery/Workbench permission. | Confirm `gcloud auth list`, the configured account, source/destination access, and Workbench service permissions. Ask the owner to grant the minimum role. |
 | `authentication` or token failure | The requested account cannot produce a usable gcloud token. | Reauthenticate with the approved account and pass `--account` explicitly. Do not paste a token into a config, task, issue, or chat. |
 | timeout, `ServerNotFoundError`, or transport error | Cloud Shell cannot reach the service or Workbench proxy. | Run `doctor`, confirm instance/location/job project, and retry later. Do not switch to an unapproved execution path to avoid the error. |
@@ -59,6 +61,7 @@ after access is corrected.
 | sample backend rejected | The sample boundary is not Workbench or required settings are missing. | Configure the Workbench profile. Do not use Cloud Shell to retrieve rows. |
 | review URL does not appear | The server was not started or the selected port is unavailable. | Run `queryflow review --task TASK --serve --port 8080` and open the printed Cloud Shell Web Preview URL. |
 | preview shows stale state | The file changed after the snapshot. | Refresh/re-run `review`; if validation changed, request a new digest. |
+| `exception prepare` rejected | The static exception is not enabled for the reviewed team profile, or the blocker is not eligible. | Fix the profile or blocker; never use an exception for syntax, policy, conflict, not-found, or integrity failures. |
 | rows appear in a durable artifact | This violates the retention boundary. | Stop sharing the artifact, remove it through the approved incident process, and keep only the row-free receipt metadata. |
 
 ## Installation
@@ -66,7 +69,7 @@ after access is corrected.
 Preview installer commands before running them:
 
 ```bash
-queryflow install --ref v0.1.0 --dry-run --json
+queryflow install --ref v0.2.0-beta.1 --dry-run --json
 ```
 
 If the CLI works but Codex does not mention QueryFlow, confirm that the

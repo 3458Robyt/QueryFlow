@@ -9,6 +9,7 @@ build/
 dist/
 .venv/
 .uv/
+.coverage
 
 # QueryFlow local state and operational artifacts
 .queryflow/

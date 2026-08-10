@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "queryflow-gcp"
-version = "0.1.0"
+dynamic = ["version"]
 description = "Flujo seguro y revisable para SQL y notebooks en Google Cloud"
 requires-python = ">=3.11"
 dependencies = [
@@ -19,6 +19,9 @@ queryflow = "queryflow.cli:main"
 
 [tool.setuptools.packages.find]
 include = ["queryflow*"]
+
+[tool.setuptools.dynamic]
+version = {attr = "queryflow.__version__"}
 
 [tool.setuptools.package-data]
 queryflow = ["py.typed"]

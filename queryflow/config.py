@@ -41,6 +41,11 @@ class QueryflowConfig:
     sample_max_rows: int = 5
     policy_max_bytes: int = 10 * 1024 * 1024 * 1024
     policy_enforced: bool = False
+    allow_static_exception: bool = False
+    review_theme: str = "dark"
+    review_mode: str = "unified"
+    review_only_changes: bool = True
+    review_context_lines: int = 3
 
 
 def _value(raw: str) -> Any:
@@ -113,6 +118,11 @@ def load_config(path: Optional[Path] = None) -> QueryflowConfig:
         sample_default_rows=int(raw.get("sample_default_rows") or 3),
         sample_max_rows=min(int(raw.get("sample_max_rows") or 5), 5),
         policy_max_bytes=min(int(raw.get("policy_max_bytes") or 10 * 1024 * 1024 * 1024), 10 * 1024 * 1024 * 1024),
+        allow_static_exception=bool(raw.get("allow_static_exception", False)),
+        review_theme=_review_theme(raw.get("review_theme")),
+        review_mode=_review_mode(raw.get("review_mode")),
+        review_only_changes=bool(raw.get("review_only_changes", True)),
+        review_context_lines=_review_context_lines(raw.get("review_context_lines")),
     )
 
 
@@ -135,10 +145,11 @@ def _load_toml_config(path: Path) -> QueryflowConfig:
         raise ConfigError("La configuración TOML debe ser un objeto")
     active = str(raw.get("active_profile") or os.environ.get("QUERYFLOW_PROFILE") or "pilot")
     profiles = raw.get("profiles") or {}
-    profile = profiles.get(active) if isinstance(profiles, dict) else None
-    if not isinstance(profile, dict):
-        profile = {}
+    profile_raw = profiles.get(active) if isinstance(profiles, dict) else None
+    profile: dict[str, Any] = profile_raw if isinstance(profile_raw, dict) else {}
     policy = Policy.from_mapping(raw.get("policy") if isinstance(raw.get("policy"), dict) else None)
+    preferences_raw = raw.get("preferences")
+    preferences: dict[str, Any] = dict(preferences_raw) if isinstance(preferences_raw, dict) else {}
     mode = str(profile.get("mode") or ("team" if active == "team" else "pilot"))
     if mode not in {"pilot", "team"}:
         raise ConfigError("mode debe ser pilot o team")
@@ -178,6 +189,11 @@ def _load_toml_config(path: Path) -> QueryflowConfig:
         sample_max_rows=min(int(profile.get("sample_max_rows") or policy.sample_max_rows), policy.sample_max_rows),
         policy_max_bytes=policy.max_bytes,
         policy_enforced=True,
+        allow_static_exception=bool(profile.get("allow_static_exception", False)),
+        review_theme=_review_theme(profile.get("review_theme", preferences.get("review_theme"))),
+        review_mode=_review_mode(profile.get("review_mode", preferences.get("review_mode"))),
+        review_only_changes=bool(profile.get("review_only_changes", preferences.get("review_only_changes", True))),
+        review_context_lines=_review_context_lines(profile.get("review_context_lines", preferences.get("review_context_lines"))),
     )
 
 
@@ -193,3 +209,27 @@ def _string_tuple(value: Any) -> tuple[str, ...]:
 
 def _optional_text(value: Any) -> Optional[str]:
     return str(value) if value else None
+
+
+def _review_theme(value: Any) -> str:
+    theme = str(value or "dark")
+    if theme not in {"dark", "light", "system"}:
+        raise ConfigError("review_theme debe ser dark, light o system")
+    return theme
+
+
+def _review_mode(value: Any) -> str:
+    mode = str(value or "unified")
+    if mode not in {"unified", "split"}:
+        raise ConfigError("review_mode debe ser unified o split")
+    return mode
+
+
+def _review_context_lines(value: Any) -> int:
+    try:
+        lines = int(value if value is not None else 3)
+    except (TypeError, ValueError) as error:
+        raise ConfigError("review_context_lines debe ser entero") from error
+    if lines < 0 or lines > 20:
+        raise ConfigError("review_context_lines debe estar entre 0 y 20")
+    return lines

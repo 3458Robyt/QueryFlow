@@ -8,6 +8,7 @@ acceso o el contenido.
 
 ```bash
 queryflow doctor --config ~/.config/queryflow/config.toml --json
+queryflow doctor --config ~/.config/queryflow/config.toml --probe-remote --json
 gcloud auth list
 queryflow config validate --json
 queryflow policy show --config ~/.config/queryflow/config.toml --json
@@ -53,7 +54,7 @@ No compartas tokens ni resultados completos de consultas. Comparte el estado,
 ## Instalación y plugin
 
 ```bash
-queryflow install --ref v0.1.0 --dry-run --json
+queryflow install --ref v0.2.0-beta.1 --dry-run --json
 ```
 
 Si la CLI funciona pero Codex no reconoce QueryFlow, confirma que el

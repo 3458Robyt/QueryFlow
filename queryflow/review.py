@@ -5,9 +5,10 @@ import hashlib
 import html
 import json
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 from .notebooks import extract_notebook_cells
+from .errors import read_diagnostic, redact_message
 from .state import task_state
 from .workspace import read_manifest
 
@@ -145,8 +146,9 @@ def _public_sample(sample: dict[str, Any] | None, *, current_sha256: str = "") -
         row_count = max(0, min(int(sample.get("row_count", 0)), 5))
     except (TypeError, ValueError):
         row_count = 0
+    raw_limit = sample.get("limit")
     try:
-        limit = max(1, min(int(sample.get("limit")), 5)) if sample.get("limit") is not None else None
+        limit = max(1, min(int(raw_limit), 5)) if isinstance(raw_limit, (int, str)) else None
     except (TypeError, ValueError):
         limit = None
     columns = [str(column)[:128] for column in (sample.get("columns") or []) if str(column).strip()][:25]
@@ -258,6 +260,8 @@ def build_review_model(
     before: bytes,
     after: bytes,
     sample: dict[str, Any] | None = None,
+    preferences: dict[str, Any] | None = None,
+    diagnostic: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     resource = manifest.get("resource") or {}
     if resource.get("kind") == "notebook":
@@ -274,6 +278,13 @@ def build_review_model(
     current_sha256 = hashlib.sha256(after).hexdigest()
     displayed_sample = _public_sample(sample, current_sha256=current_sha256)
     displayed_validation = dict(validation)
+    for section_name in ("static", "dry_run"):
+        section = displayed_validation.get(section_name)
+        if isinstance(section, dict):
+            section_copy = dict(section)
+            section_copy["errors"] = [redact_message(item) for item in section.get("errors") or []]
+            displayed_validation[section_name] = section_copy
+    displayed_validation["errors"] = [redact_message(item) for item in validation.get("errors") or []]
     validated_sha256 = validation.get("content_sha256") or manifest.get("proposed_sha256")
     if validated_sha256 and validated_sha256 != current_sha256:
         displayed_validation["stale"] = True
@@ -300,7 +311,15 @@ def build_review_model(
             str(resource.get("kind") or ""),
             displayed_sample,
         ),
+        "preferences": {
+            "review_theme": str((preferences or {}).get("review_theme") or "dark"),
+            "review_mode": str((preferences or {}).get("review_mode") or "unified"),
+            "review_only_changes": bool((preferences or {}).get("review_only_changes", True)),
+            "review_context_lines": max(0, min(int((preferences or {}).get("review_context_lines", 3)), 20)),
+        },
     }
+    if diagnostic:
+        model["diagnostic"] = diagnostic
     canonical = json.dumps(model, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
     model["revision"] = hashlib.sha256(canonical).hexdigest()
     return model
@@ -318,7 +337,7 @@ def _validation_cards(validation: dict[str, Any]) -> str:
     )
 
 
-def _file_html(file: dict[str, Any]) -> str:
+def _file_html(file: dict[str, Any], *, context_lines: int = 3) -> str:
     before = str(file["before"])
     after = str(file["after"])
     split = difflib.HtmlDiff(wrapcolumn=120).make_table(
@@ -327,7 +346,7 @@ def _file_html(file: dict[str, Any]) -> str:
         fromdesc="Original",
         todesc="Propuesta",
         context=True,
-        numlines=3,
+        numlines=max(0, min(int(context_lines), 20)),
     )
     if not file["changed"]:
         split = '<p class="unchanged">Sin cambios.</p>'
@@ -379,29 +398,6 @@ def _render_modern_review(model: dict[str, Any], *, live: bool = False) -> str:
     backend_label = "Workbench" if backend == "workbench" else "Cloud Shell"
     digest = str(manifest.get("approval_digest") or "")
     digest_display = digest[:16] + "…" if len(digest) > 16 else (digest or "pendiente")
-    sample_status = str(sample.get("status") or "pending")
-    sample_status_label = {
-        "ok": "completada",
-        "failed": "fallida",
-        "stale": "no vigente",
-        "pending": "pendiente",
-    }.get(sample_status, sample_status)
-    sample_class = "success" if sample_status == "ok" else "error" if sample_status in {"failed", "stale"} else "pending"
-    sample_digest = str(sample.get("execution_digest") or "")
-    sample_digest_display = sample_digest[:16] + "…" if len(sample_digest) > 16 else (sample_digest or "pendiente")
-    sample_columns = ", ".join(str(column) for column in sample.get("columns") or []) or "sin columnas"
-    sample_detail = (
-        f"{sample.get('row_count', 0)} filas · límite {sample.get('limit') or '—'} · columnas: {sample_columns}"
-        if sample_status == "ok"
-        else "Lista para ejecutarse explícitamente en Workbench (máximo 5 filas)."
-        if sample_status == "pending"
-        else "; ".join(str(error) for error in sample.get("errors") or []) or "No se pudo conservar una muestra vigente."
-    )
-    sample_html = (
-        f'<div class="sample-inline {sample_class}"><div><strong>Muestra: {html.escape(sample_status_label)}</strong>'
-        f'<span>{html.escape(sample_detail)}</span></div><code title="{html.escape(sample_digest)}">'
-        f'{html.escape(sample_digest_display)}</code></div>'
-    )
     display_name = str(resource.get("display_name") or resource.get("name") or "Recurso")
     location = str(resource.get("location") or "—")
     project = str(resource.get("project") or "—")
@@ -600,8 +596,118 @@ applyView();
 </body></html>"""
 
 
+def _render_minimal_dark_review(model: dict[str, Any], *, live: bool = False) -> str:
+    """Render the analyst-facing, dark-first review surface.
+
+    The model remains deliberately richer than this projection so agents and
+    integrations can use the workflow metadata without forcing an analyst to
+    look at a dashboard full of cards and progress widgets.
+    """
+    manifest = model.get("manifest") or {}
+    resource = manifest.get("resource") or {}
+    validation = model.get("validation") or {}
+    summary = model.get("summary") or {}
+    preferences = model.get("preferences") or {}
+    files = list(model.get("files") or [])
+    status = str(manifest.get("workflow_state") or validation.get("status") or "draft")
+    errors = list(validation.get("errors") or [])
+    for section in (validation.get("static") or {}, validation.get("dry_run") or {}):
+        errors.extend(str(item) for item in section.get("errors") or [])
+    has_error = status in {"blocked_vpc", "blocked_permission", "failed", "changes_required", "conflict"} or bool(errors)
+    state_class = "error" if has_error else "success" if status in {"ready", "approved", "published"} else "neutral"
+    display_name = str(resource.get("display_name") or resource.get("name") or "Recurso")
+    resource_kind = str(resource.get("kind") or "recurso")
+    metadata = " · ".join(item for item in (resource_kind, str(resource.get("project") or ""), str(resource.get("location") or "")) if item)
+    digest = str(manifest.get("approval_digest") or "")
+    digest_button = (
+        f'<button class="button subtle" id="copy-digest" type="button" data-digest="{html.escape(digest)}">Copiar digest</button>'
+        if digest
+        else ""
+    )
+    diagnostic = model.get("diagnostic") or validation.get("diagnostic")
+    diagnostic_payload = diagnostic if isinstance(diagnostic, dict) else {
+        "category": validation.get("error_kind"),
+        "message": redact_message(errors[0] if errors else "La validación no fue publicable"),
+    }
+    diagnostic_json = json.dumps(diagnostic_payload, ensure_ascii=False, separators=(",", ":"))
+    theme = html.escape(str(preferences.get("review_theme") or "dark"))
+    default_mode = html.escape(str(preferences.get("review_mode") or "unified"))
+    default_filter = "changed" if preferences.get("review_only_changes", True) else "all"
+    context_lines = max(0, min(int(preferences.get("review_context_lines", 3)), 20))
+    error_panel = ""
+    if has_error:
+        error_message = redact_message(errors[0] if errors else "La validación no fue publicable")
+        diagnostic_id = str(diagnostic_payload.get("error_id") or "")
+        diagnostic_note = f'<p>ID de diagnóstico: <code>{html.escape(diagnostic_id)}</code></p>' if diagnostic_id else ""
+        error_panel = (
+            f'<section class="error-panel" aria-live="assertive"><div><strong>{html.escape(error_message)}</strong>'
+            f'<p>Revisa el diagnóstico antes de volver a validar.</p>{diagnostic_note}</div>'
+            f'<button class="button subtle" id="copy-diagnostic" type="button" data-diagnostic="{html.escape(diagnostic_json)}">Copiar diagnóstico</button></section>'
+        )
+    changed_files = [file for file in files if file.get("changed")]
+    selector = ""
+    if len(changed_files) > 1:
+        options = "".join(
+            f'<option value="change-{hashlib.sha256(str(file["path"]).encode("utf-8")).hexdigest()[:12]}">{html.escape(str(file["label"]))}</option>'
+            for file in changed_files
+        )
+        selector = f'<label class="cell-selector">Ir a cambio <select id="change-select">{options}</select></label>'
+    files_html = "".join(_file_html(file, context_lines=context_lines) for file in files)
+    validation_message = (
+        "La validación terminó correctamente."
+        if validation.get("ok")
+        else "La validación necesita atención."
+    )
+    content_note = "consulta SQL" if resource_kind in {"shared_query", "scheduled_query"} else "contenido del notebook"
+    dry_run = validation.get("dry_run") or {}
+    # The HTML already contains the rendered diff. Do not duplicate complete
+    # before/after SQL in the embedded model: this keeps large previews small
+    # and gives browser integrations metadata without another payload copy.
+    public_model = dict(model)
+    public_model["files"] = [
+        {key: value for key, value in file.items() if key not in {"before", "after"}}
+        for file in files
+    ]
+    model_json = json.dumps(public_model, ensure_ascii=False, separators=(",", ":"))
+    model_json = model_json.replace("<", "\\u003c").replace(">", "\\u003e").replace("&", "\\u0026")
+    live_script = "" if not live else """
+const initialRevision = document.body.dataset.revision;
+setInterval(async () => { try { const response = await fetch('/api/review', {cache: 'no-store'}); const next = await response.json(); if (next.revision !== initialRevision) window.location.reload(); } catch (_) {} }, 2000);
+"""
+    css = """
+:root { color-scheme: dark; --bg:#0f172a; --surface:#172033; --surface-2:#1e293b; --text:#f8fafc; --muted:#a8b3c7; --faint:#71809a; --border:#334155; --blue:#60a5fa; --green:#4ade80; --green-bg:#123c2a; --red:#fb7185; --red-bg:#431d2a; --yellow:#facc15; --radius:10px; }
+* { box-sizing:border-box; } html { scroll-behavior:smooth; } body { margin:0; background:var(--bg); color:var(--text); font:14px/1.5 system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; } button,select { font:inherit; } a { color:var(--blue); } .skip-link { position:absolute; left:12px; top:-40px; padding:8px 10px; background:var(--blue); color:#07111f; border-radius:6px; z-index:30; } .skip-link:focus { top:12px; }
+.topbar { border-bottom:1px solid var(--border); background:#111a2b; } .topbar-inner { max-width:1400px; margin:0 auto; padding:22px clamp(16px,4vw,48px) 18px; } .eyebrow { color:var(--faint); font-size:12px; letter-spacing:.08em; text-transform:uppercase; } .identity { display:flex; align-items:flex-start; justify-content:space-between; gap:18px; margin-top:6px; } h1 { margin:0; font-size:clamp(20px,3vw,30px); letter-spacing:-.02em; } .meta { margin-top:5px; color:var(--muted); font-family:ui-monospace,SFMono-Regular,Consolas,monospace; font-size:12px; overflow-wrap:anywhere; } .state { flex:0 0 auto; padding:5px 9px; border:1px solid var(--border); border-radius:999px; color:var(--muted); font-family:ui-monospace,SFMono-Regular,Consolas,monospace; font-size:12px; } .state.success { border-color:#23864b; color:var(--green); } .state.error { border-color:#a63c57; color:var(--red); } .summary { display:flex; flex-wrap:wrap; gap:10px 18px; margin-top:16px; color:var(--muted); font-size:13px; } .summary strong { color:var(--text); font-family:ui-monospace,SFMono-Regular,Consolas,monospace; } .added { color:var(--green); } .removed { color:var(--red); }
+main { max-width:1400px; margin:0 auto; padding:22px clamp(16px,4vw,48px) 56px; } .validation-panel,.error-panel { display:flex; align-items:center; justify-content:space-between; gap:16px; padding:14px 16px; margin-bottom:14px; border:1px solid var(--border); border-radius:var(--radius); background:var(--surface); } .validation-panel h2 { margin:0; font-size:15px; } .validation-panel p,.error-panel p { margin:3px 0 0; color:var(--muted); font-size:13px; } .validation-status { color:var(--green); font-family:ui-monospace,SFMono-Regular,Consolas,monospace; } .error-panel { border-color:#8d334b; background:var(--red-bg); } .error-panel strong { color:#fecdd3; } .error-panel p { color:#fda4af; }
+.toolbar { display:flex; flex-wrap:wrap; align-items:center; gap:8px; margin-bottom:10px; } .button { min-height:36px; padding:7px 11px; border:1px solid var(--border); border-radius:7px; background:var(--surface-2); color:var(--text); cursor:pointer; } .button:hover { border-color:var(--blue); } .button:focus-visible,select:focus-visible,input:focus-visible { outline:2px solid var(--blue); outline-offset:2px; } .button.active { border-color:var(--blue); background:#244263; } .subtle { color:var(--muted); } .toolbar-spacer { flex:1; } .filter-label,.cell-selector { display:inline-flex; align-items:center; gap:7px; color:var(--muted); } input { accent-color:var(--blue); } select { min-height:34px; padding:5px 8px; border:1px solid var(--border); border-radius:7px; background:var(--surface-2); color:var(--text); }
+.file-block { overflow:hidden; margin:0 0 16px; border:1px solid var(--border); border-radius:var(--radius); background:var(--surface); scroll-margin-top:16px; } .file-block header { display:flex; align-items:center; justify-content:space-between; gap:12px; padding:11px 14px; border-bottom:1px solid var(--border); background:var(--surface-2); } .file-title strong,.file-title small { display:block; } .file-title small { margin-top:2px; color:var(--faint); font:12px ui-monospace,SFMono-Regular,Consolas,monospace; } .counts { white-space:nowrap; font:12px ui-monospace,SFMono-Regular,Consolas,monospace; }
+table.diff,table.unified { width:100%; border-collapse:collapse; table-layout:fixed; font:13px/1.55 ui-monospace,SFMono-Regular,Consolas,monospace; } table.diff td,table.diff th,table.unified td,table.unified th { border:1px solid var(--border); padding:4px 9px; vertical-align:top; white-space:pre-wrap; overflow-wrap:anywhere; } table.diff th,table.unified th { color:var(--muted); background:var(--surface-2); text-align:left; font:12px system-ui,sans-serif; } table.diff .diff_add,table.unified .add { background:var(--green-bg); } table.diff .diff_sub,table.unified .sub { background:var(--red-bg); } table.diff .diff_chg { background:#4a3b14; } table.unified td:nth-child(1),table.unified td:nth-child(2) { width:64px; color:var(--faint); text-align:right; user-select:none; } .split-view { display:none; overflow:auto; } .unified-view { overflow:auto; } body[data-mode="split"] .split-view { display:block; } body[data-mode="split"] .unified-view { display:none; } body[data-filter="changed"] .file-block[data-changed="false"] { display:none; } .empty-filter { display:none; padding:18px; border:1px dashed var(--border); border-radius:var(--radius); color:var(--muted); text-align:center; } body[data-filter="changed"] .empty-filter { display:block; } body[data-filter="changed"] .file-block[data-changed="true"] ~ .empty-filter { display:none; }
+details { margin-top:14px; border:1px solid var(--border); border-radius:var(--radius); background:var(--surface); } summary { padding:11px 14px; cursor:pointer; color:var(--muted); } pre.validation { max-height:360px; overflow:auto; margin:0; padding:14px; border-top:1px solid var(--border); color:var(--muted); background:#111a2b; font:12px/1.5 ui-monospace,SFMono-Regular,Consolas,monospace; } .live-note { color:var(--faint); font-size:12px; } .sr-only { position:absolute; width:1px; height:1px; padding:0; margin:-1px; overflow:hidden; clip:rect(0,0,0,0); white-space:nowrap; border:0; }
+body[data-theme="light"] { --bg:#f8fafc; --surface:#fff; --surface-2:#f1f5f9; --text:#0f172a; --muted:#475569; --faint:#64748b; --border:#cbd5e1; --green-bg:#dcfce7; --red-bg:#fee2e2; } @media (prefers-color-scheme: light) { body[data-theme="system"] { --bg:#f8fafc; --surface:#fff; --surface-2:#f1f5f9; --text:#0f172a; --muted:#475569; --faint:#64748b; --border:#cbd5e1; --green-bg:#dcfce7; --red-bg:#fee2e2; } } @media (max-width:700px) { .identity,.validation-panel,.error-panel { display:block; } .state { display:inline-block; margin-top:10px; } .validation-panel .button,.error-panel .button { margin-top:10px; } .toolbar-spacer { display:none; } table.diff,table.unified { min-width:720px; } }
+"""
+    script = f"""
+const taskKey = "queryflow-review-" + (document.body.dataset.task || "task");
+const saved = JSON.parse(localStorage.getItem(taskKey + "-view") || "null") || {{}};
+const state = {{mode: saved.mode || document.body.dataset.mode || "{default_mode}", filter: saved.filter || document.body.dataset.filter || "{default_filter}"}};
+const liveRegion = document.getElementById("live-region");
+function applyView() {{ document.body.dataset.mode = state.mode; document.body.dataset.filter = state.filter; document.querySelectorAll("[data-mode]").forEach(button => button.classList.toggle("active", button.dataset.mode === state.mode)); const only = document.getElementById("show-only-changes"); if (only) only.checked = state.filter === "changed"; localStorage.setItem(taskKey + "-view", JSON.stringify(state)); }}
+document.querySelectorAll("[data-mode]").forEach(button => button.addEventListener("click", () => {{ state.mode = button.dataset.mode; applyView(); }}));
+document.getElementById("show-only-changes")?.addEventListener("change", event => {{ state.filter = event.target.checked ? "changed" : "all"; applyView(); }});
+document.getElementById("copy-digest")?.addEventListener("click", async event => {{ try {{ await navigator.clipboard.writeText(event.currentTarget.dataset.digest); liveRegion.textContent = "Digest copiado."; }} catch (_) {{ liveRegion.textContent = "No se pudo copiar el digest."; }} }});
+document.getElementById("copy-diagnostic")?.addEventListener("click", async event => {{ try {{ await navigator.clipboard.writeText(JSON.stringify(JSON.parse(event.currentTarget.dataset.diagnostic), null, 2)); liveRegion.textContent = "Diagnóstico copiado."; }} catch (_) {{ liveRegion.textContent = "No se pudo copiar el diagnóstico."; }} }});
+document.getElementById("change-select")?.addEventListener("change", event => document.getElementById(event.target.value)?.scrollIntoView({{behavior:"smooth", block:"start"}}));
+applyView();
+"""
+    validation_json = html.escape(json.dumps(validation, ensure_ascii=False, indent=2, sort_keys=True))
+    return f"""<!doctype html>
+<html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>QueryFlow · revisión</title><style>{css}</style></head>
+<body data-theme="{theme}" data-mode="{default_mode}" data-filter="{default_filter}" data-revision="{html.escape(str(model.get('revision', '')))}" data-task="{html.escape(str(manifest.get('task_id', 'task')))}">
+<a class="skip-link" href="#review-main">Saltar al diff</a><header class="topbar"><div class="topbar-inner"><div class="eyebrow">QueryFlow · revisión de cambio</div><div class="identity"><div><h1>{html.escape(display_name)}</h1><div class="meta">{html.escape(metadata)} · tarea {html.escape(str(manifest.get('task_id') or ''))}</div></div><span class="state {state_class}">{html.escape(status)}</span></div><div class="summary"><span><strong>+{summary.get('lines_added', 0)}</strong> añadidas</span><span><strong class="removed">−{summary.get('lines_removed', 0)}</strong> eliminadas</span><span>{html.escape('Workbench' if validation.get('backend') == 'workbench' else 'Cloud Shell')}</span></div></div></header>
+<main id="review-main" tabindex="-1">{error_panel}<section class="validation-panel" aria-live="polite"><div><h2>Validación · <span class="validation-status">{html.escape(str(validation.get('status') or status))}</span></h2><p>{html.escape(validation_message)} · {html.escape(content_note)} · estimación {html.escape(_format_bytes(dry_run.get('bytes_processed')))}.</p></div><div>{digest_button}</div></section><div class="toolbar"><div><button class="button" type="button" data-mode="unified" aria-pressed="true">Unificada</button><button class="button" type="button" data-mode="split" aria-pressed="false">Dividida</button></div><label class="filter-label" aria-label="Mostrar solo cambios"><input id="show-only-changes" type="checkbox" {'checked' if default_filter == 'changed' else ''}> Solo cambios</label>{selector}<span class="toolbar-spacer"></span><span class="live-note">{'Actualización automática activa' if live else 'Vista local · solo lectura'}</span></div>{files_html}<div class="empty-filter">No hay cambios visibles con este filtro.</div><details><summary>Ver detalles técnicos</summary><pre class="validation">{validation_json}</pre></details></main><div id="live-region" class="sr-only" aria-live="polite"></div><script type="application/json" id="queryflow-model">{model_json}</script><script>{script}{live_script}</script></body></html>"""
+
+
 def render_review_model(model: dict[str, Any], *, live: bool = False) -> str:
-    return _render_modern_review(model, live=live)
+    return _render_minimal_dark_review(model, live=live)
 
 
 def render_review_html(before: str, after: str, validation: dict[str, Any]) -> str:
@@ -616,13 +722,14 @@ def render_review_html(before: str, after: str, validation: dict[str, Any]) -> s
     return render_review_model(model)
 
 
-def write_review_html(task: Path, before: bytes | str, after: bytes | str, validation: dict[str, Any]) -> Path:
+def write_review_html(task: Path, before: bytes | str, after: bytes | str, validation: dict[str, Any], preferences: dict[str, Any] | None = None) -> Path:
     manifest = read_manifest(task)
     before_bytes = before.encode("utf-8") if isinstance(before, str) else before
     after_bytes = after.encode("utf-8") if isinstance(after, str) else after
     target = task / "review.html"
+    diagnostic = read_diagnostic(task)
     target.write_text(
-        render_review_model(build_review_model(manifest, validation, before_bytes, after_bytes, _read_sample_receipt(task))),
+        render_review_model(build_review_model(manifest, validation, before_bytes, after_bytes, _read_sample_receipt(task), preferences, diagnostic.to_dict() if diagnostic else None)),
         encoding="utf-8",
     )
     return target

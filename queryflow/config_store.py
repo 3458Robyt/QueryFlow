@@ -15,6 +15,13 @@ class ConfigStoreError(RuntimeError):
 
 
 FORBIDDEN_KEYS = {"token", "access_token", "refresh_token", "password", "secret", "private_key"}
+CURRENT_SCHEMA_VERSION = 2
+DEFAULT_PREFERENCES = {
+    "review_theme": "dark",
+    "review_mode": "unified",
+    "review_only_changes": True,
+    "review_context_lines": 3,
+}
 
 
 @dataclass(frozen=True)
@@ -39,7 +46,7 @@ class ConfigStore:
 
     def load(self) -> ConfigDocument:
         if not self.path.exists():
-            return ConfigDocument(1, "pilot", {}, {})
+            return ConfigDocument(CURRENT_SCHEMA_VERSION, "pilot", {}, dict(DEFAULT_PREFERENCES))
         try:
             raw = tomllib.loads(self.path.read_text(encoding="utf-8"))
         except (OSError, tomllib.TOMLDecodeError) as error:
@@ -50,11 +57,12 @@ class ConfigStore:
         preferences = raw.get("preferences") or {}
         if not isinstance(profiles, dict) or not isinstance(preferences, dict):
             raise ConfigStoreError("profiles y preferences deben ser tablas TOML")
+        preferences = {**DEFAULT_PREFERENCES, **dict(preferences)}
         return ConfigDocument(
-            schema_version=int(raw.get("schema_version", 1)),
+            schema_version=max(int(raw.get("schema_version", 1)), CURRENT_SCHEMA_VERSION),
             active_profile=str(raw.get("active_profile", "pilot")),
             profiles={str(key): dict(value) for key, value in profiles.items() if isinstance(value, dict)},
-            preferences=dict(preferences),
+            preferences=preferences,
         )
 
     def initialize(self, *, profile: str, values: dict[str, Any], preferences: dict[str, Any] | None = None) -> ConfigDocument:
@@ -63,10 +71,10 @@ class ConfigStore:
         profiles = dict(document.profiles)
         profiles[profile] = dict(values)
         merged = ConfigDocument(
-            schema_version=1,
+            schema_version=CURRENT_SCHEMA_VERSION,
             active_profile=profile,
             profiles=profiles,
-            preferences={**document.preferences, **(preferences or {})},
+            preferences={**DEFAULT_PREFERENCES, **document.preferences, **(preferences or {})},
         )
         self.write(merged)
         return merged
@@ -86,10 +94,10 @@ class ConfigStore:
         _assert_safe_value(value)
         cursor[parts[-1]] = value
         updated = ConfigDocument(
-            schema_version=int(data.get("schema_version", 1)),
+            schema_version=max(int(data.get("schema_version", 1)), CURRENT_SCHEMA_VERSION),
             active_profile=str(data.get("active_profile", "pilot")),
             profiles=dict(data.get("profiles") or {}),
-            preferences=dict(data.get("preferences") or {}),
+            preferences={**DEFAULT_PREFERENCES, **dict(data.get("preferences") or {})},
         )
         self.write(updated)
         return updated

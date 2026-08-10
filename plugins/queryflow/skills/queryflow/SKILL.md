@@ -16,6 +16,12 @@ approval.
   Dataform repository directly.
 - Validate before asking for publication approval. `--static-only` is local
   prevalidation and never creates a publishable digest.
+- Use `queryflow status --task TASK --json` after each meaningful transition;
+  use `queryflow diagnose --task TASK --format markdown` for a safe support
+  bundle when a step is blocked.
+- Use `queryflow doctor --probe-remote --json` when an administrator needs a
+  read-only check of enabled APIs and the Workbench instance; the default
+  `doctor` remains local-only.
 - Treat unknown, dynamic, multi-statement, and mutating SQL as blocked.
 - Use Workbench as the boundary for real dry-runs and samples. Never move row
   values to Cloud Shell, task files, audit archives, Git, or chat outside the
@@ -35,8 +41,9 @@ approval.
 4. Validate: run `queryflow validate --task TASK --config CONFIG --json` and
    report static classification, backend, dry-run status, bytes, warnings,
    references, and the publication digest.
-5. Review: run `queryflow review --task TASK --serve`; direct the analyst to
-   the Cloud Shell Web Preview. Confirm the red/green diff and changed cells.
+5. Review: run `queryflow review --task TASK --serve --watch`; direct the
+   analyst to the single dark Cloud Shell Web Preview. Confirm the red/green
+   diff and changed cells without requiring copy/paste into BigQuery Studio.
 6. Sample (optional): show the separate execution digest, obtain explicit
    approval, then run `queryflow sample --task TASK --limit 3
    --approved-digest SAMPLE_DIGEST --account ACCOUNT --config CONFIG --json`.
@@ -46,6 +53,21 @@ approval.
    Then run `queryflow publish --task TASK --approved-digest DIGEST
    --destination-project DESTINATION --account ACCOUNT --config CONFIG` and
    report read-back/audit.
+
+## Controlled static exception
+
+If real validation is blocked by an approved perimeter dependency, first prove
+that static SQL validation succeeded. In the reviewed `team` profile only, run:
+
+```bash
+queryflow exception prepare --task TASK --reason REASON \
+  --reference TICKET --config CONFIG --json
+```
+
+Present the independent exception digest and wait for explicit approval.
+Publish with `--approved-exception-digest`, never with a normal digest. This
+path only saves a code asset; it never executes SQL, enables schedules, or
+overrides syntax, policy, conflict, not-found, or integrity blocks.
 
 ## Stop and report
 
@@ -58,6 +80,12 @@ blocked the action and the next safe diagnostic; do not suggest a bypass.
 When handing work back, include task path, resource, changed files/cells,
 validation backend/status, bytes/warnings, review URL, sample metadata,
 publication digest, and any blocker.
+
+Codex owns the conversation end to end: it discovers the canonical resource,
+starts/resumes the task, edits isolated content, opens the preview, explains
+diagnostics, presents the digest, waits for approval, publishes through
+QueryFlow, and reports read-back. QueryFlow remains deterministic; the agent
+must never invent or bypass a digest.
 
 ## Load details only when needed
 

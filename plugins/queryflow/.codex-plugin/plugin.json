@@ -1,6 +1,6 @@
 {
   "name": "queryflow",
-  "version": "0.1.0",
+  "version": "0.2.0b1",
   "description": "Flujo seguro para crear, revisar, validar y publicar SQL en Google Cloud.",
   "author": {
     "name": "QueryFlow"

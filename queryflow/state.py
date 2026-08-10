@@ -23,6 +23,7 @@ WORKFLOW_STATES = frozenset(
         "ready",
         "approved",
         "published",
+        "exception_prepared",
         "changes_required",
         "blocked_vpc",
         "blocked_permission",
@@ -79,6 +80,8 @@ def task_state(
     """Derive the safe user-facing state from task artifacts."""
     if manifest.get("published"):
         return "published"
+    if manifest.get("exception_digest"):
+        return "exception_prepared"
     validation = validation or {}
     stored_sha = validation.get("content_sha256") or manifest.get("proposed_sha256")
     if current_sha256 and stored_sha and current_sha256 != stored_sha:

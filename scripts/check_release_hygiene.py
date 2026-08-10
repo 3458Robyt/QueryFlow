@@ -10,7 +10,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from queryflow.release_hygiene import EXCLUDED_PARTS, INTERNAL_PATTERNS, HygieneFinding
+from queryflow.release_hygiene import EXCLUDED_PARTS, INTERNAL_PATTERNS, HygieneFinding  # noqa: E402
 
 
 def main() -> int:
