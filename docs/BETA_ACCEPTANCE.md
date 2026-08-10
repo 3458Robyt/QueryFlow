@@ -45,6 +45,13 @@ con varias celdas, excepciones estáticas independientes, Web Preview oscuro y
 
 ## Aceptación manual pendiente en GCP
 
+La comprobación remota de solo lectura realizada el 10 de agosto de 2026
+confirmó autenticación activa, configuración completa y todas las APIs requeridas
+en el proyecto configurado. La instancia Workbench configurada sigue bloqueada
+por VPC Service Controls (`error_category: vpc`). QueryFlow conserva el
+identificador del proveedor en el diagnóstico local, pero no lo incluye en este
+informe. No se realizó ninguna escritura en GCP.
+
 Con una cuenta y perímetro aprobados, el responsable debe ejecutar desde Cloud
 Shell:
 
