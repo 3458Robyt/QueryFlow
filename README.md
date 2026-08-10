@@ -191,7 +191,7 @@ mutante automáticamente.
 
 ```bash
 uv run --frozen python -m unittest discover -q
-uv build
+python3 scripts/build_release.py
 ```
 
 El paquete requiere Python 3.11+ y las integraciones con GCP deben ser

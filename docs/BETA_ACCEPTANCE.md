@@ -21,7 +21,7 @@ python3 scripts/check_version_consistency.py
 python3 scripts/validate_plugin.py plugins/queryflow
 python3 scripts/check_release_hygiene.py
 uv lock --check
-uv build
+python3 scripts/build_release.py
 ```
 
 ## Resultado local
@@ -32,8 +32,8 @@ uv build
   beta, coherencia de versión, higiene del release y plugin pasaron.
 - La cobertura actual del repositorio es 70%; el gate beta se fija en 55%
   porque la CLI/adaptadores heredados de v0.1 aún tienen rutas no cubiertas.
-- `uv build` produce wheel y paquete fuente; los archivos `dist/*` se deben
-  adjuntar a la Release junto con `SHA256SUMS`.
+- `scripts/build_release.py` produce wheel y paquete fuente reproducibles; los
+  archivos `dist/*` se deben adjuntar a la Release junto con `SHA256SUMS`.
 
 ## Escenarios cubiertos
 
