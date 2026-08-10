@@ -26,7 +26,7 @@ uv build
 
 ## Resultado local
 
-- 157 pruebas pasaron en Python 3.12; la matriz CI repite el conjunto en
+- 158 pruebas pasaron en Python 3.12; la matriz CI repite el conjunto en
   Python 3.11 y 3.12.
 - Compilación, Ruff, formato de los archivos nuevos, tipos de los módulos
   beta, coherencia de versión, higiene del release y plugin pasaron.
