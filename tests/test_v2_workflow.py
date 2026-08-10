@@ -58,6 +58,43 @@ class V2WorkflowTests(unittest.TestCase):
         self.assertNotIn('class="sidebar"', html)
         self.assertNotIn('class="workflow"', html)
 
+    def test_review_has_accessible_responsive_contract(self):
+        html = render_review_model(
+            {
+                "manifest": {
+                    "task_id": "ui-a11y",
+                    "workflow_state": "ready",
+                    "resource": {"kind": "shared_query", "display_name": "q"},
+                },
+                "validation": {"status": "ready", "ok": True, "publishable": True},
+                "summary": {"lines_added": 1, "lines_removed": 0},
+                "files": [
+                    {
+                        "path": "content.sql",
+                        "label": "content.sql",
+                        "before": "SELECT 1",
+                        "after": "SELECT 2",
+                        "added": 1,
+                        "removed": 0,
+                        "changed": True,
+                    }
+                ],
+                "preferences": {"review_theme": "dark"},
+            }
+        )
+        for marker in (
+            'name="viewport" content="width=device-width, initial-scale=1"',
+            "@media (max-width:700px)",
+            "min-height:44px",
+            "#94a3b8",
+            "overflow-x:hidden",
+            ".button:focus-visible",
+            "@media (prefers-reduced-motion: reduce)",
+            'class="skip-link"',
+            'aria-live="polite"',
+        ):
+            self.assertIn(marker, html)
+
     def test_diagnostic_is_redacted_and_preserves_vpc_identifier(self):
         bearer_secret = "x" * 32
         diagnostic = make_diagnostic(
