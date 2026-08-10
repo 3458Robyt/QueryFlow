@@ -30,7 +30,7 @@ uv build
   Python 3.11 y 3.12.
 - Compilación, Ruff, formato de los archivos nuevos, tipos de los módulos
   beta, coherencia de versión, higiene del release y plugin pasaron.
-- La cobertura actual del repositorio es 60%; el gate beta se fija en 55%
+- La cobertura actual del repositorio es 70%; el gate beta se fija en 55%
   porque la CLI/adaptadores heredados de v0.1 aún tienen rutas no cubiertas.
 - `uv build` produce wheel y paquete fuente; los archivos `dist/*` se deben
   adjuntar a la Release junto con `SHA256SUMS`.
