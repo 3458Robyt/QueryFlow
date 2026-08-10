@@ -12,7 +12,10 @@ from queryflow.errors import make_diagnostic
 from queryflow.validation import ValidationResult
 from queryflow.workspace import create_workspace
 from queryflow.catalog import Catalog, ResourceRef
+from queryflow.config import load_config
+from queryflow.config_store import ConfigStore
 from queryflow.review import build_review_model, render_review_model
+from queryflow.state import task_state
 
 
 class V2WorkflowTests(unittest.TestCase):
@@ -197,6 +200,31 @@ class V2WorkflowTests(unittest.TestCase):
         html = render_review_model(model)
         self.assertNotIn("SQL_REDACTED", html)
         self.assertLess(len(html), 100_000)
+
+    def test_v1_configuration_and_task_state_upgrade_without_losing_values(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            config_path = Path(temporary) / "config.toml"
+            config_path.write_text(
+                "schema_version = 1\nactive_profile = 'pilot'\n\n"
+                "[profiles.pilot]\nmode = 'pilot'\nsource_projects = ['source-project']\n",
+                encoding="utf-8",
+            )
+            document = ConfigStore(config_path).load()
+            config = load_config(config_path)
+        self.assertEqual(2, document.schema_version)
+        self.assertEqual(("source-project",), config.source_projects)
+        self.assertEqual("dark", config.review_theme)
+        self.assertEqual(
+            "ready",
+            task_state(
+                {
+                    "schema_version": 1,
+                    "proposed_sha256": "new",
+                    "baseline_sha256": "old",
+                },
+                {"ok": True, "dry_run": {"dry_run_ok": True}},
+            ),
+        )
 
     def test_team_static_exception_has_independent_digest_and_publishes_code_only(self):
         class FakeClient:
