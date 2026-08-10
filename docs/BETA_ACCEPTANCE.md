@@ -14,9 +14,9 @@ uvx --from ruff==0.8.6 ruff format --check \
   queryflow/errors.py scripts/check_version_consistency.py tests/test_v2_workflow.py
 uvx --from mypy==1.14.1 mypy --ignore-missing-imports \
   queryflow
-uvx --from coverage==7.6.10 coverage run --source=queryflow \
-  -m unittest test_queryflow.py tests
-uvx --from coverage==7.6.10 coverage report --fail-under=55
+uv run --with coverage==7.6.10 coverage run --source=queryflow \
+  -m unittest discover -q
+uv run --with coverage==7.6.10 coverage report --fail-under=55
 python3 scripts/check_version_consistency.py
 python3 scripts/validate_plugin.py plugins/queryflow
 python3 scripts/check_release_hygiene.py

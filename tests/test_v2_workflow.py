@@ -59,10 +59,11 @@ class V2WorkflowTests(unittest.TestCase):
         self.assertNotIn('class="workflow"', html)
 
     def test_diagnostic_is_redacted_and_preserves_vpc_identifier(self):
+        bearer_secret = "x" * 32
         diagnostic = make_diagnostic(
             "Request is prohibited by organization's policy (VPC Service Controls) "
             "vpcServiceControlsUniqueIdentifier: perimeter-abc123 "
-            "Authorization: Bearer very-long-secret-token",
+            "Authorization: Bearer " + bearer_secret,
             stage="validate",
             context={"task_id": "demo", "account": "analyst@example.com"},
         )
@@ -72,7 +73,7 @@ class V2WorkflowTests(unittest.TestCase):
             "perimeter-abc123",
             payload["provider"]["identifiers"]["vpcServiceControlsUniqueIdentifier"],
         )
-        self.assertNotIn("very-long-secret-token", json.dumps(payload))
+        self.assertNotIn(bearer_secret, json.dumps(payload))
         self.assertIn("QF-", payload["error_id"])
 
         sql_payload = make_diagnostic(

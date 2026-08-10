@@ -15,12 +15,12 @@ jobs:
       - uses: astral-sh/setup-uv@v6
         with:
           python-version: "3.12"
-      - run: uv run python -m unittest test_queryflow.py tests
+      - run: uv run python -m unittest discover -q
       - run: uvx --from ruff==0.8.6 ruff check queryflow tests scripts
       - run: uvx --from ruff==0.8.6 ruff format --check queryflow/errors.py scripts/check_version_consistency.py tests/test_v2_workflow.py
       - run: uvx --from mypy==1.14.1 mypy --ignore-missing-imports queryflow
-      - run: uvx --from coverage==7.6.10 coverage run --source=queryflow -m unittest test_queryflow.py tests
-      - run: uvx --from coverage==7.6.10 coverage report --fail-under=55
+      - run: uv run --with coverage==7.6.10 coverage run --source=queryflow -m unittest discover -q
+      - run: uv run --with coverage==7.6.10 coverage report --fail-under=55
       - run: python3 scripts/validate_plugin.py plugins/queryflow
       - run: python3 scripts/check_version_consistency.py
       - run: python3 scripts/check_release_hygiene.py

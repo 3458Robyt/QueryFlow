@@ -190,7 +190,7 @@ mutante automáticamente.
 ## Desarrollo
 
 ```bash
-uv run --frozen python -m unittest test_queryflow.py tests
+uv run --frozen python -m unittest discover -q
 uv build
 ```
 
