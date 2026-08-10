@@ -28,6 +28,7 @@ from .errors import (
     clear_latest_diagnostic,
     exception_digest,
     make_diagnostic,
+    provider_identifiers,
     redact_message,
     read_diagnostic,
     write_diagnostic,
@@ -371,7 +372,11 @@ def _redact_validation_messages(value: Any) -> Any:
     return value
 
 
-def _gcloud_services_probe(project: str, required_apis: list[str]) -> dict[str, Any]:
+def _gcloud_services_probe(
+    project: str,
+    required_apis: list[str],
+    acceptable_any: list[str] | None = None,
+) -> dict[str, Any]:
     """Check enabled APIs without changing the project."""
     if not shutil.which("gcloud"):
         return {
@@ -381,7 +386,10 @@ def _gcloud_services_probe(project: str, required_apis: list[str]) -> dict[str, 
             "required": required_apis,
             "enabled": [],
             "missing": required_apis,
+            "acceptable_any": acceptable_any or [],
+            "missing_alternatives": acceptable_any or [],
             "error_category": "configuration",
+            "provider": {"identifiers": {}},
             "error": "gcloud no está instalado",
         }
     completed = subprocess.run(
@@ -398,16 +406,22 @@ def _gcloud_services_probe(project: str, required_apis: list[str]) -> dict[str, 
         text=True,
     )
     enabled = sorted({line.strip() for line in completed.stdout.splitlines() if line.strip()})
+    alternatives = acceptable_any or []
     missing = sorted(set(required_apis) - set(enabled))
-    error = redact_message(completed.stderr) if completed.returncode != 0 else ""
+    missing_alternatives = bool(alternatives) and not any(api in enabled for api in alternatives)
+    raw_error = completed.stderr if completed.returncode != 0 else ""
+    error = redact_message(raw_error) if raw_error else ""
     return {
         "attempted": True,
-        "ok": completed.returncode == 0 and not missing,
+        "ok": completed.returncode == 0 and not missing and not missing_alternatives,
         "project": project,
         "required": required_apis,
         "enabled": enabled,
         "missing": missing,
+        "acceptable_any": alternatives,
+        "missing_alternatives": alternatives if missing_alternatives else [],
         "error_category": classify_message(error) if error else None,
+        "provider": {"identifiers": provider_identifiers(raw_error)},
         "error": error,
     }
 
@@ -419,6 +433,7 @@ def _gcloud_workbench_probe(config: QueryflowConfig) -> dict[str, Any]:
             "attempted": False,
             "ok": False,
             "error_category": "configuration",
+            "provider": {"identifiers": {}},
             "error": "gcloud no está instalado",
         }
     if not all((config.workbench_project, config.workbench_location, config.workbench_instance)):
@@ -426,6 +441,7 @@ def _gcloud_workbench_probe(config: QueryflowConfig) -> dict[str, Any]:
             "attempted": False,
             "ok": False,
             "error_category": "configuration",
+            "provider": {"identifiers": {}},
             "error": "Falta proyecto, ubicación o instancia Workbench",
         }
     common = [
@@ -439,6 +455,7 @@ def _gcloud_workbench_probe(config: QueryflowConfig) -> dict[str, Any]:
         ["gcloud", "notebooks", "instances", "describe", str(config.workbench_instance), *common],
     ]
     failures: list[str] = []
+    identifiers: dict[str, str] = {}
     for command in attempts:
         completed = subprocess.run(command, check=False, capture_output=True, text=True)
         if completed.returncode == 0:
@@ -452,6 +469,7 @@ def _gcloud_workbench_probe(config: QueryflowConfig) -> dict[str, Any]:
             }
         if completed.stderr.strip():
             failures.append(redact_message(completed.stderr))
+            identifiers.update(provider_identifiers(completed.stderr))
     error = failures[-1] if failures else "No se pudo describir la instancia Workbench"
     return {
         "attempted": True,
@@ -460,6 +478,7 @@ def _gcloud_workbench_probe(config: QueryflowConfig) -> dict[str, Any]:
         "location": config.workbench_location,
         "instance": config.workbench_instance,
         "error_category": classify_message(error),
+        "provider": {"identifiers": identifiers},
         "error": error,
     }
 
@@ -476,7 +495,7 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
             text=True,
         )
         auth_accounts = [line.strip() for line in completed.stdout.splitlines() if line.strip()]
-        auth_error = completed.stderr.strip()[:240] if completed.returncode != 0 else ""
+        auth_error = redact_message(completed.stderr) if completed.returncode != 0 else ""
     workbench_config = {
         "project": bool(config.workbench_project),
         "location": bool(config.workbench_location),
@@ -519,16 +538,22 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
             "cloudasset.googleapis.com",
             "dataform.googleapis.com",
         ]
-        if config.validation_backend == "workbench":
-            required_apis.append("notebooks.googleapis.com")
+        acceptable_any = (
+            ["notebooks.googleapis.com", "aiplatform.googleapis.com"]
+            if config.validation_backend == "workbench"
+            else []
+        )
         api_project = config.workbench_project or (config.destination_projects[0] if config.destination_projects else "")
-        checks["apis"] = _gcloud_services_probe(api_project, required_apis) if api_project else {
+        checks["apis"] = _gcloud_services_probe(api_project, required_apis, acceptable_any) if api_project else {
             "attempted": False,
             "ok": False,
             "required": required_apis,
             "enabled": [],
             "missing": required_apis,
+            "acceptable_any": acceptable_any,
+            "missing_alternatives": acceptable_any,
             "error_category": "configuration",
+            "provider": {"identifiers": {}},
             "error": "No hay proyecto configurado para consultar APIs",
         }
         checks["workbench_connectivity"] = (

@@ -33,9 +33,10 @@ queryflow policy show --config ~/.config/queryflow/config.toml --json
 
 El modo `--probe-remote` consulta las APIs habilitadas y describe la instancia
 Workbench con operaciones de solo lectura. Para el flujo principal se esperan
-`bigquery.googleapis.com`, `cloudasset.googleapis.com`,
-`dataform.googleapis.com` y, si el backend es Workbench,
-`notebooks.googleapis.com`. No habilita APIs ni ejecuta SQL.
+`bigquery.googleapis.com`, `cloudasset.googleapis.com` y
+`dataform.googleapis.com`. Para Workbench se acepta
+`notebooks.googleapis.com` o `aiplatform.googleapis.com`, según el tipo de
+instancia. No habilita APIs ni ejecuta SQL.
 
 ## Diagnósticos para soporte
 
