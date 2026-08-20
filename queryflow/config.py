@@ -132,6 +132,7 @@ def load_config(path: Optional[Path] = None) -> QueryflowConfig:
         workbench_instance=(str(raw["workbench_instance"]) if raw.get("workbench_instance") else None),
         workbench_job_project=(str(raw["workbench_job_project"]) if raw.get("workbench_job_project") else None),
         workbench_timeout_seconds=workbench_timeout_seconds,
+        profile_name=mode,
         source_projects=_string_tuple(raw.get("source_projects")),
         destination_projects=_string_tuple(raw.get("destination_projects")),
         allowed_locations=_string_tuple(raw.get("allowed_locations")),

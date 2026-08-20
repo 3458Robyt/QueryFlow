@@ -73,6 +73,7 @@ def profile_table(
     location: Optional[str] = None,
     execute: bool = False,
     maximum_bytes_billed: int = 1_073_741_824,
+    account: Optional[str] = None,
     runner: Callable[[list[str]], tuple[int, str, str]] = subprocess_runner,
     gcloud_context: Optional[GcloudContext] = None,
 ) -> ProfileResult:
@@ -93,7 +94,9 @@ def profile_table(
         location=location,
         project_id=table_ref.split(".", 1)[0],
         maximum_bytes_billed=maximum_bytes_billed,
+        account=account,
         runner=runner,
+        gcloud_context=gcloud_context,
     )
     if not execute or dry.dry_run_ok is not True:
         return ProfileResult(table_ref, query, dry, False, None)

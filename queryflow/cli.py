@@ -685,7 +685,13 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
         "workbench_instance": config.workbench_instance,
         "profile": config.profile_name,
         "policy_max_bytes": config.policy_max_bytes,
-        "gcloud_auth": {"ok": bool(auth_accounts), "accounts": len(auth_accounts), "error": auth_error},
+        "gcloud_auth": {
+            "ok": bool(auth_accounts) and (not config.account or config.account in auth_accounts),
+            "accounts": len(auth_accounts),
+            "configured_account": config.account,
+            "configured_account_present": not config.account or config.account in auth_accounts,
+            "error": auth_error,
+        },
         "gcloud_config": {
             "configured": str(config.gcloud_config_dir),
             "account": config.account,
@@ -735,7 +741,7 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
         )
         checks["remote_probe"] = {"attempted": True, "ok": bool(checks["apis"]["ok"]) and bool(checks["workbench_connectivity"]["ok"])}
     _print_result(checks, args.json)
-    required = checks["git"] and checks["gcloud"] and checks["bq"] and bool(auth_accounts)
+    required = checks["git"] and checks["gcloud"] and checks["bq"] and bool(checks["gcloud_auth"]["ok"])
     if config.validation_backend == "workbench":
         required = required and checks["websockets"] and bool(checks["workbench_config"]["ok"])
     if getattr(args, "probe_remote", False):
@@ -920,6 +926,7 @@ def _cmd_profile(args: argparse.Namespace) -> int:
             location=args.location,
             execute=args.execute,
             maximum_bytes_billed=min(args.max_bytes, config.policy_max_bytes),
+            account=getattr(args, "account", None) or config.account,
             gcloud_context=_gcloud_context(config, getattr(args, "account", None) or config.account),
         )
     except ProfileError as error:
@@ -1010,7 +1017,9 @@ def _cmd_start(args: argparse.Namespace) -> int:
     if args.resource:
         catalog = load_catalog(config.catalog_path)
     resource = _resource_from_args(args, catalog)
-    destination_project = _resolve_config_project(config, args.destination_project) or _active_destination(config)
+    explicit_destination = _resolve_config_project(config, args.destination_project) if args.destination_project else None
+    context_destination = _active_destination(config)
+    destination_project = explicit_destination or context_destination
     if not destination_project:
         # A canonical resource carries its source project, which is also the
         # safe default destination for backwards-compatible local starts.
@@ -1649,9 +1658,21 @@ def _cmd_publish(args: argparse.Namespace) -> int:
     if mode not in {"copy", "new", "update"}:
         raise CliError("La tarea tiene un modo de publicación no soportado")
     resource = ResourceRef.from_dict(manifest["resource"])
-    destination_project = args.destination_project or manifest.get("destination_project") or resource.project
-    if destination_project in config.project_aliases:
-        destination_project = config.project_aliases[destination_project]
+    def _publish_destination(value: Any) -> Optional[str]:
+        if value is None or not str(value).strip():
+            return None
+        text = str(value).strip()
+        return config.project_aliases.get(text, text)
+
+    requested_destination = _publish_destination(args.destination_project)
+    snapshot_value = manifest.get("destination_project")
+    # Tasks written before destination snapshots were introduced remain safe:
+    # their canonical resource project is the only implicit destination they
+    # may use. A caller cannot repoint such a task to another project.
+    snapshot_destination = (str(snapshot_value).strip() if snapshot_value else None) or resource.project
+    if requested_destination and snapshot_destination and requested_destination != snapshot_destination:
+        raise CliError("El proyecto destino explícito no coincide con el snapshot de la tarea")
+    destination_project = requested_destination or snapshot_destination
     if not destination_project:
         raise CliError("No hay proyecto destino; usa --destination-project o crea la tarea con un contexto")
     if not args.account:

@@ -66,9 +66,23 @@ workbench_job_project = "jobs-project"
 
     config = load_config(path)
 
+    assert config.profile_name == "team"
     assert config.workbench_instance_project == "legacy-workbench-project"
     assert config.workbench_instance_location == "us-east1-b"
     assert config.workbench_instance_name == "legacy-instance"
+
+
+def test_legacy_full_access_profile_name_matches_mode(tmp_path):
+    path = tmp_path / "legacy.yaml"
+    path.write_text(
+        "mode: full-access\nworkspace_root: /tmp/queryflow-tasks\n",
+        encoding="utf-8",
+    )
+
+    config = load_config(path)
+
+    assert config.mode == "full-access"
+    assert config.profile_name == "full-access"
 
 
 def test_config_store_reads_project_context_without_credentials(tmp_path):

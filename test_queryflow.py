@@ -1669,7 +1669,7 @@ class CliTests(unittest.TestCase):
             self.assertEqual(
                 0,
                 main([
-                    "start", "--kind", "shared_query", "--name", "q1", "--project", "p",
+                    "start", "--kind", "shared_query", "--name", "q1", "--project", "d",
                     "--location", "us", "--content-file", str(content), "--task-id", "t1",
                     "--workspace-root", str(root), "--json",
                 ]),

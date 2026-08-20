@@ -100,3 +100,22 @@ def test_workbench_discovery_uses_profile_context(tmp_path):
 
     assert result == "https://workbench.example"
     assert run.call_args.kwargs["env"]["CLOUDSDK_CONFIG"] == str(tmp_path / "gcloud")
+
+
+def test_profile_table_passes_configured_account_and_context_to_dry_run(tmp_path):
+    from queryflow.profile import profile_table
+    from queryflow.validation import ValidationResult
+
+    context = GcloudContext(tmp_path / "gcloud", account="analyst@example.com")
+    dry_result = ValidationResult([], "read_only", True, dry_run_ok=True)
+    with patch("queryflow.profile.dry_run_sql", return_value=dry_result) as dry_run:
+        result = profile_table(
+            "project.dataset.table",
+            [],
+            account="analyst@example.com",
+            gcloud_context=context,
+        )
+
+    assert result.dry_run is dry_result
+    assert dry_run.call_args.kwargs["account"] == "analyst@example.com"
+    assert dry_run.call_args.kwargs["gcloud_context"] is context

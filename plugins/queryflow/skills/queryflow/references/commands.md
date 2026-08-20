@@ -30,7 +30,7 @@ digest; never abbreviate it when passing it to `sample` or `publish`. Add
 | `validate` | yes | with `--backend workbench` or non-static local dry-run | no |
 | `review` | yes | no | no |
 | `sample` | yes | yes, Workbench only | no |
-| `publish` | yes | yes | yes, only after digest approval |
+| `publish` | yes | yes | normal profiles: digest approval; full-access force: explicit reason and audit |
 | `exception prepare` | yes | no | no |
 | `profile --execute` | yes | yes | no, read-only profiling only |
 
@@ -208,6 +208,20 @@ queryflow publish --task TASK --approved-digest DIGEST \
 
 Publishing performs the configured audit and remote read-back. The pilot
 creates a new copy; it does not update or delete an existing resource.
+
+In the `full-access` profile, an analyst may explicitly authorize a notebook or
+shared-query publication when validation is unavailable:
+
+```bash
+queryflow publish --task TASK --force-publish --reason "ticket or approval" \
+  --destination-project destination-project --account analyst@example.com \
+  --config ~/.config/queryflow/config.toml --json
+```
+
+This route skips dry-run approval but still binds the destination to the task
+snapshot, records the reason before the remote write, checks the remote head,
+and verifies the published content with a read-back. It never publishes
+scheduled queries, executes SQL, deletes resources, or creates datasets.
 
 For an approved static exception in the team profile:
 
