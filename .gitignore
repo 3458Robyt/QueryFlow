@@ -34,6 +34,7 @@ test_rewrite_notebook_routes.py
 
 # IDE and OS files
 .cloudshell/
+.worktrees/
 .idea/
 .vscode/
 .DS_Store
