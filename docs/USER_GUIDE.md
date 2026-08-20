@@ -10,7 +10,7 @@ publica después de aprobar un digest exacto.
 Desde Cloud Shell:
 
 ```bash
-uvx --from git+https://github.com/3458Robyt/QueryFlow.git@v0.2.0-beta.1 queryflow install
+uvx --from git+https://github.com/3458Robyt/QueryFlow.git@v0.3.0-beta.1 queryflow install
 queryflow init
 ```
 
@@ -36,11 +36,12 @@ Ejemplo sintético:
 
 ```bash
 queryflow init --profile pilot \
+  --gcloud-config-dir ~/.config/gcloud \
   --source-projects source-project \
   --destination-projects destination-project \
-  --workbench-project workbench-project \
-  --workbench-location us-east1-b \
-  --workbench-instance workbench-instance \
+  --workbench-instance-project workbench-instance-project \
+  --workbench-instance-location us-east1-b \
+  --workbench-instance-name workbench-instance \
   --workbench-job-project workbench-project
 queryflow config validate --json
 queryflow policy show --json
@@ -49,6 +50,21 @@ queryflow policy show --json
 El perfil `team` solo debe usarse con una configuración aprobada por el
 responsable de permisos. No convierte automáticamente el piloto en modo de
 actualización.
+
+Para una migración, registra una sola vez el origen y destino y comprueba el
+contexto antes de iniciar la tarea:
+
+```bash
+queryflow context alias set replication replication-project
+queryflow context alias set analytics analytics-project
+queryflow context set --source replication --destination analytics
+queryflow context show --json
+```
+
+Puedes cambiar el perfil local con `queryflow permissions use pilot|team|full-access`.
+`full-access` solo está pensado para una orden explícita de publicación de un
+notebook o Shared Query cuando el dry-run no está disponible; no ejecuta SQL ni
+elimina recursos.
 
 ## 3. Crear o modificar una query
 
@@ -173,6 +189,21 @@ queryflow exception prepare --task TASK \
 El agente muestra el digest de excepción y espera una aprobación explícita.
 La publicación con ese digest solo guarda el código y mantiene las
 comprobaciones de concurrencia, política, auditoría y lectura posterior.
+
+### Publicación explícita en `full-access`
+
+Si el analista ordena publicar sin validación/dry-run, usa el motivo auditable:
+
+```bash
+queryflow permissions use full-access
+queryflow publish --task TASK --force-publish \
+  --reason "Aprobación explícita del analista" \
+  --account analyst@example.com --config ~/.config/queryflow/config.toml --json
+```
+
+QueryFlow mantiene la búsqueda canónica, el proyecto destino de la tarea, el
+control de `head`, la auditoría, el hash del contenido y el read-back. Deja
+`force-authorization.json` para revisión posterior.
 
 ## 7. Qué debe recibir el analista
 

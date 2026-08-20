@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import os
 import tomllib
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
 
@@ -21,6 +21,8 @@ class QueryflowConfig:
     catalog_path: Path
     audit_root: Optional[str]
     mode: str = "pilot"
+    account: Optional[str] = None
+    gcloud_config_dir: Path = Path.home() / ".config" / "gcloud"
     profile_max_bytes: int = 1_073_741_824
     catalog_ttl_hours: int = 24
     profile_ttl_hours: int = 168
@@ -42,10 +44,26 @@ class QueryflowConfig:
     policy_max_bytes: int = 10 * 1024 * 1024 * 1024
     policy_enforced: bool = False
     allow_static_exception: bool = False
+    allow_force_publish: bool = False
+    project_aliases: dict[str, str] = field(default_factory=dict)
+    context_source_project: Optional[str] = None
+    context_destination_project: Optional[str] = None
     review_theme: str = "dark"
     review_mode: str = "unified"
     review_only_changes: bool = True
     review_context_lines: int = 3
+
+    @property
+    def workbench_instance_project(self) -> Optional[str]:
+        return self.workbench_project
+
+    @property
+    def workbench_instance_location(self) -> Optional[str]:
+        return self.workbench_location
+
+    @property
+    def workbench_instance_name(self) -> Optional[str]:
+        return self.workbench_instance
 
 
 def _value(raw: str) -> Any:
@@ -87,8 +105,8 @@ def load_config(path: Optional[Path] = None) -> QueryflowConfig:
     audit_value = raw.get("audit_root")
     audit_root = str(audit_value) if audit_value else None
     mode = str(raw.get("mode") or "pilot")
-    if mode not in {"pilot", "team"}:
-        raise ConfigError("mode debe ser pilot o team")
+    if mode not in {"pilot", "team", "full-access"}:
+        raise ConfigError("mode debe ser pilot, team o full-access")
     validation_backend = str(raw.get("validation_backend") or "local")
     if validation_backend not in {"local", "workbench"}:
         raise ConfigError("validation_backend debe ser local o workbench")
@@ -100,6 +118,8 @@ def load_config(path: Optional[Path] = None) -> QueryflowConfig:
         catalog_path=catalog_path,
         audit_root=audit_root,
         mode=mode,
+        account=_optional_text(raw.get("account")),
+        gcloud_config_dir=Path(str(raw.get("gcloud_config_dir") or home / ".config" / "gcloud")).expanduser(),
         profile_max_bytes=int(raw.get("profile_max_bytes") or 1_073_741_824),
         catalog_ttl_hours=int(raw.get("catalog_ttl_hours") or 24),
         profile_ttl_hours=int(raw.get("profile_ttl_hours") or 168),
@@ -119,6 +139,10 @@ def load_config(path: Optional[Path] = None) -> QueryflowConfig:
         sample_max_rows=min(int(raw.get("sample_max_rows") or 5), 5),
         policy_max_bytes=min(int(raw.get("policy_max_bytes") or 10 * 1024 * 1024 * 1024), 10 * 1024 * 1024 * 1024),
         allow_static_exception=bool(raw.get("allow_static_exception", False)),
+        allow_force_publish=bool(raw.get("allow_force_publish", mode == "full-access")),
+        project_aliases=_text_mapping(raw.get("project_aliases")),
+        context_source_project=_optional_text(raw.get("source_project")),
+        context_destination_project=_optional_text(raw.get("destination_project")),
         review_theme=_review_theme(raw.get("review_theme")),
         review_mode=_review_mode(raw.get("review_mode")),
         review_only_changes=bool(raw.get("review_only_changes", True)),
@@ -150,9 +174,9 @@ def _load_toml_config(path: Path) -> QueryflowConfig:
     policy = Policy.from_mapping(raw.get("policy") if isinstance(raw.get("policy"), dict) else None)
     preferences_raw = raw.get("preferences")
     preferences: dict[str, Any] = dict(preferences_raw) if isinstance(preferences_raw, dict) else {}
-    mode = str(profile.get("mode") or ("team" if active == "team" else "pilot"))
-    if mode not in {"pilot", "team"}:
-        raise ConfigError("mode debe ser pilot o team")
+    mode = str(profile.get("mode") or {"team": "team", "full-access": "full-access"}.get(active, "pilot"))
+    if mode not in {"pilot", "team", "full-access"}:
+        raise ConfigError("mode debe ser pilot, team o full-access")
     max_bytes = int(profile.get("max_bytes") or policy.default_max_bytes)
     max_bytes = min(max_bytes, policy.max_bytes)
     workspace_root = Path(str(profile.get("workspace_root") or Path.home() / ".queryflow" / "tasks")).expanduser()
@@ -169,16 +193,18 @@ def _load_toml_config(path: Path) -> QueryflowConfig:
         catalog_path=catalog_path,
         audit_root=audit_root,
         mode=mode,
+        account=_optional_text(profile.get("account")),
+        gcloud_config_dir=Path(str(profile.get("gcloud_config_dir") or Path.home() / ".config" / "gcloud")).expanduser(),
         profile_max_bytes=max_bytes,
         catalog_ttl_hours=int(profile.get("catalog_ttl_hours") or 24),
         profile_ttl_hours=int(profile.get("profile_ttl_hours") or 168),
-        allow_update_existing=bool(profile.get("allow_update_existing", mode == "team")),
+        allow_update_existing=bool(profile.get("allow_update_existing", mode in {"team", "full-access"})),
         allow_delete=False,
         allow_create_dataset=False,
         validation_backend=validation_backend,
-        workbench_project=_optional_text(profile.get("workbench_project")),
-        workbench_location=_optional_text(profile.get("workbench_location")),
-        workbench_instance=_optional_text(profile.get("workbench_instance")),
+        workbench_project=_optional_text(profile.get("workbench_instance_project") or profile.get("workbench_project")),
+        workbench_location=_optional_text(profile.get("workbench_instance_location") or profile.get("workbench_location")),
+        workbench_instance=_optional_text(profile.get("workbench_instance_name") or profile.get("workbench_instance")),
         workbench_job_project=_optional_text(profile.get("workbench_job_project")),
         workbench_timeout_seconds=timeout,
         profile_name=active,
@@ -190,6 +216,10 @@ def _load_toml_config(path: Path) -> QueryflowConfig:
         policy_max_bytes=policy.max_bytes,
         policy_enforced=True,
         allow_static_exception=bool(profile.get("allow_static_exception", False)),
+        allow_force_publish=bool(profile.get("allow_force_publish", mode == "full-access")),
+        project_aliases=_text_mapping(raw.get("project_aliases")),
+        context_source_project=_optional_text((raw.get("context") or {}).get("source_project") if isinstance(raw.get("context"), dict) else None),
+        context_destination_project=_optional_text((raw.get("context") or {}).get("destination_project") if isinstance(raw.get("context"), dict) else None),
         review_theme=_review_theme(profile.get("review_theme", preferences.get("review_theme"))),
         review_mode=_review_mode(profile.get("review_mode", preferences.get("review_mode"))),
         review_only_changes=bool(profile.get("review_only_changes", preferences.get("review_only_changes", True))),
@@ -209,6 +239,14 @@ def _string_tuple(value: Any) -> tuple[str, ...]:
 
 def _optional_text(value: Any) -> Optional[str]:
     return str(value) if value else None
+
+
+def _text_mapping(value: Any) -> dict[str, str]:
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise ConfigError("Los alias de proyectos deben ser una tabla")
+    return {str(key): str(item) for key, item in value.items() if str(key).strip() and str(item).strip()}
 
 
 def _review_theme(value: Any) -> str:

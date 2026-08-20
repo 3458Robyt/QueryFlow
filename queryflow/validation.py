@@ -8,6 +8,8 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Optional, Sequence
 
+from .gcloud import GcloudContext
+
 
 class ValidationError(RuntimeError):
     """A validation operation failed before a write could be attempted."""
@@ -246,13 +248,24 @@ def subprocess_runner(command: list[str]) -> tuple[int, str, str]:
     return completed.returncode, completed.stdout, completed.stderr
 
 
-def gcloud_access_token(account: str) -> str:
-    completed = subprocess.run(
-        ["gcloud", f"--account={account}", "auth", "print-access-token"],
-        check=False,
-        capture_output=True,
-        text=True,
-    )
+def _gcloud_context_runner(context: GcloudContext) -> Runner:
+    """Run bq (and related CLIs) with the same persistent gcloud profile."""
+    def run(command: list[str]) -> tuple[int, str, str]:
+        completed = subprocess.run(
+            command,
+            check=False,
+            capture_output=True,
+            text=True,
+            env=context.environment(),
+        )
+        return completed.returncode, completed.stdout, completed.stderr
+
+    return run
+
+
+def gcloud_access_token(account: str, *, context: Optional[GcloudContext] = None) -> str:
+    runner = context or GcloudContext.default()
+    completed = runner.run(["auth", "print-access-token"], account=account)
     if completed.returncode != 0 or not completed.stdout.strip():
         raise ValidationError(completed.stderr.strip() or "No se pudo obtener el token de la cuenta indicada")
     return completed.stdout.strip()
@@ -267,10 +280,12 @@ def dry_run_sql(
     runner: Runner = subprocess_runner,
     account: Optional[str] = None,
     token_provider: TokenProvider = gcloud_access_token,
+    gcloud_context: Optional[GcloudContext] = None,
 ) -> ValidationResult:
     static = validate_sql_text(sql)
     if static.errors:
         return static
+    effective_runner = _gcloud_context_runner(gcloud_context) if gcloud_context and runner is subprocess_runner else runner
     command = [
         "bq",
         "query",
@@ -286,7 +301,11 @@ def dry_run_sql(
     if account:
         try:
             command.append("--use_google_auth=false")
-            command.append(f"--oauth_access_token={token_provider(account)}")
+            if token_provider is gcloud_access_token:
+                token = token_provider(account, context=gcloud_context)
+            else:
+                token = token_provider(account)
+            command.append(f"--oauth_access_token={token}")
         except ValidationError as error:
             return ValidationResult(
                 references=static.references,
@@ -298,7 +317,7 @@ def dry_run_sql(
                 error_kind="authentication",
             )
     command.append(sql)
-    returncode, stdout, stderr = runner(command)
+    returncode, stdout, stderr = effective_runner(command)
     if returncode != 0:
         message = stderr.strip() or stdout.strip() or "BigQuery dry-run falló"
         return ValidationResult(
@@ -352,20 +371,23 @@ def dry_run_sql_fragments(
     runner: Runner = subprocess_runner,
     account: Optional[str] = None,
     token_provider: TokenProvider = gcloud_access_token,
+    gcloud_context: Optional[GcloudContext] = None,
 ) -> ValidationResult:
     """Dry-run each SQL fragment and aggregate the safe review result."""
     static = validate_sql_fragments(fragments)
     if static.errors:
         return static
+    effective_runner = _gcloud_context_runner(gcloud_context) if gcloud_context and runner is subprocess_runner else runner
     results = [
         (index, sql, dry_run_sql(
             sql,
             location=location,
             project_id=project_id,
             maximum_bytes_billed=maximum_bytes_billed,
-            runner=runner,
+            runner=effective_runner,
             account=account,
             token_provider=token_provider,
+            gcloud_context=gcloud_context,
         ))
         for index, sql in fragments
     ]
@@ -425,10 +447,12 @@ def execute_read_only_sql(
     runner: Runner = subprocess_runner,
     account: Optional[str] = None,
     token_provider: TokenProvider = gcloud_access_token,
+    gcloud_context: Optional[GcloudContext] = None,
 ) -> ExecutionResult:
     static = validate_sql_text(sql)
     if not static.read_only or static.errors:
         return ExecutionResult(False, [], "La ejecución opcional requiere una consulta de lectura pura")
+    effective_runner = _gcloud_context_runner(gcloud_context) if gcloud_context and runner is subprocess_runner else runner
     command = [
         "bq",
         "query",
@@ -444,11 +468,15 @@ def execute_read_only_sql(
     if account:
         try:
             command.append("--use_google_auth=false")
-            command.append(f"--oauth_access_token={token_provider(account)}")
+            if token_provider is gcloud_access_token:
+                token = token_provider(account, context=gcloud_context)
+            else:
+                token = token_provider(account)
+            command.append(f"--oauth_access_token={token}")
         except ValidationError as error:
             return ExecutionResult(False, [], str(error))
     command.append(sql)
-    returncode, stdout, stderr = runner(command)
+    returncode, stdout, stderr = effective_runner(command)
     if returncode != 0:
         return ExecutionResult(False, [], stderr.strip() or stdout.strip() or "La consulta falló")
     try:
@@ -471,11 +499,13 @@ def execute_read_only_sql_fragments(
     runner: Runner = subprocess_runner,
     account: Optional[str] = None,
     token_provider: TokenProvider = gcloud_access_token,
+    gcloud_context: Optional[GcloudContext] = None,
 ) -> ExecutionResult:
     """Execute notebook SQL fragments independently with bounded output."""
     static = validate_sql_fragments(fragments)
     if not static.read_only or static.errors:
         return ExecutionResult(False, [], "La ejecución opcional requiere consultas de lectura puras")
+    effective_runner = _gcloud_context_runner(gcloud_context) if gcloud_context and runner is subprocess_runner else runner
     rows: list[dict[str, Any]] = []
     for index, sql in fragments:
         result = execute_read_only_sql(
@@ -483,9 +513,10 @@ def execute_read_only_sql_fragments(
             location=location,
             project_id=project_id,
             maximum_bytes_billed=maximum_bytes_billed,
-            runner=runner,
+            runner=effective_runner,
             account=account,
             token_provider=token_provider,
+            gcloud_context=gcloud_context,
         )
         if not result.ok:
             return ExecutionResult(False, [], f"celda {index}: {result.error or 'la consulta falló'}")

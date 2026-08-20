@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import json
 import re
+import subprocess
 from dataclasses import dataclass
 from typing import Any, Callable, Optional
 
 from .validation import dry_run_sql, subprocess_runner, ValidationResult
+from .gcloud import GcloudContext
 
 
 class ProfileError(RuntimeError):
@@ -72,7 +74,19 @@ def profile_table(
     execute: bool = False,
     maximum_bytes_billed: int = 1_073_741_824,
     runner: Callable[[list[str]], tuple[int, str, str]] = subprocess_runner,
+    gcloud_context: Optional[GcloudContext] = None,
 ) -> ProfileResult:
+    if gcloud_context is not None and runner is subprocess_runner:
+        def runner(command: list[str]) -> tuple[int, str, str]:
+            completed = subprocess.run(
+                command,
+                env=gcloud_context.environment(),
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            return completed.returncode, completed.stdout, completed.stderr
+
     query = build_profile_query(table_ref, schema)
     dry = dry_run_sql(
         query,

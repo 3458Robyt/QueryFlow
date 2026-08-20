@@ -11,6 +11,8 @@ salida vaya a ser procesada por Codex u otra herramienta.
 | `queryflow version` | Ver versión de CLI, configuración y plugin. | no | no |
 | `queryflow init` | Crear o actualizar un perfil TOML sin secretos. | no | no |
 | `queryflow config` | Leer/validar preferencias locales. | no | no |
+| `queryflow context` | Seleccionar proyectos origen/destino y alias. | no | no |
+| `queryflow permissions` | Cambiar el perfil de permisos local. | no | no |
 | `queryflow policy` | Mostrar o probar filtros de seguridad. | no | no |
 | `queryflow install` | Instalar CLI y plugin desde GitHub. | GitHub | no |
 | `queryflow self-update` | Actualizar CLI y plugin desde una referencia. | GitHub | no |
@@ -40,17 +42,19 @@ queryflow version --json
 
 ### `queryflow init`
 
-Crea un perfil local. Opciones principales: `--profile pilot|team`,
-`--account`, `--source-projects`, `--destination-projects`, los cuatro campos
-`--workbench-*`, `--validation-backend` y `--max-bytes`.
+Crea un perfil local. Opciones principales: `--profile pilot|team|full-access`,
+`--account`, `--gcloud-config-dir`, los proyectos y alias, los cuatro campos
+explícitos de Workbench (`--workbench-instance-project`,
+`--workbench-instance-location`, `--workbench-instance-name` y
+`--workbench-job-project`), `--validation-backend` y `--max-bytes`.
 
 ```bash
 queryflow init --profile pilot \
   --source-projects source-project \
   --destination-projects destination-project \
-  --workbench-project workbench-project \
-  --workbench-location us-east1-b \
-  --workbench-instance workbench-instance \
+  --workbench-instance-project workbench-instance-project \
+  --workbench-instance-location us-east1-b \
+  --workbench-instance-name workbench-instance \
   --workbench-job-project workbench-project --json
 ```
 
@@ -67,6 +71,34 @@ queryflow config validate --json
 ```
 
 No guardes tokens, contraseñas, claves privadas o valores de autorización.
+
+### `queryflow context` y `queryflow permissions`
+
+El contexto permite modelar migraciones sin repetir IDs y se copia al
+`manifest.json` de cada tarea:
+
+```bash
+queryflow context alias set replication replication-project
+queryflow context alias set analytics analytics-project
+queryflow context set --source replication --destination analytics
+queryflow context show --json
+```
+
+Usa `permissions show` para ver el perfil activo y cambia entre `pilot`,
+`team` y `full-access` con `permissions use`. El perfil `full-access` no
+ejecuta SQL ni elimina recursos; únicamente habilita una publicación explícita
+de notebooks o Shared Queries sin digest cuando el analista proporciona un
+motivo auditable:
+
+```bash
+queryflow permissions use full-access
+queryflow publish --task TASK --force-publish \
+  --reason "Aprobación explícita del analista" \
+  --account analyst@example.com --config ~/.config/queryflow/config.toml --json
+```
+
+La publicación force todavía exige destino permitido, control de conflicto,
+auditoría, `force-authorization.json` y lectura remota de comprobación.
 
 ### `queryflow policy`
 
@@ -86,8 +118,8 @@ otra combinación de flags.
 Usa `--dry-run` para ver las instrucciones antes de ejecutar cambios locales:
 
 ```bash
-queryflow install --ref v0.2.0-beta.1 --dry-run --json
-queryflow self-update --ref v0.2.0-beta.1 --dry-run --json
+queryflow install --ref v0.3.0-beta.1 --dry-run --json
+queryflow self-update --ref v0.3.0-beta.1 --dry-run --json
 ```
 
 Ambos comandos usan la misma referencia para el paquete Python y el plugin.
@@ -213,9 +245,9 @@ contiene digest, conteo, columnas, límite, timestamp, truncación y errores.
 
 ### `queryflow publish`
 
-Requiere `--task`, el digest completo, `--destination-project` y `--account`.
-También necesita una validación real, auditoría configurada y lectura posterior
-coincidente:
+El flujo normal requiere `--task`, el digest completo, `--account`, auditoría
+configurada y lectura posterior coincidente. El destino se toma del argumento
+o del contexto guardado en la tarea:
 
 ```bash
 queryflow publish --task TASK --approved-digest DIGEST \
@@ -224,7 +256,20 @@ queryflow publish --task TASK --approved-digest DIGEST \
 ```
 
 En `pilot` crea una copia nueva. La actualización de un recurso existente está
-restringida al perfil `team` y no se habilita mediante un flag aislado.
+restringida a `team` o `full-access` y no se habilita mediante un flag aislado.
+
+Cuando el analista ha seleccionado `full-access`, puede ordenar una publicación
+sin validación/dry-run con autorización explícita:
+
+```bash
+queryflow publish --task TASK --force-publish \
+  --reason "Aprobación explícita del analista" \
+  --account analyst@example.com --config ~/.config/queryflow/config.toml --json
+```
+
+Esta ruta solo aplica a notebooks y Shared Queries. Conserva control de
+recurso canónico, destino, conflicto de `head`, auditoría y read-back, y deja
+`force-authorization.json` junto a la tarea.
 
 ### `queryflow exception prepare`
 

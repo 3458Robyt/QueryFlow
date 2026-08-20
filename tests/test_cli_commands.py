@@ -107,6 +107,35 @@ class CliCommandTests(unittest.TestCase):
         self.assertEqual(status, 2)
         self.assertIn('"allowed": false', output.getvalue())
 
+    def test_policy_check_allows_update_in_full_access_profile(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "config.toml"
+            path.write_text(
+                "active_profile = 'full-access'\n\n[profiles.full-access]\n"
+                "mode = 'full-access'\nallow_update_existing = true\nallow_force_publish = true\n",
+                encoding="utf-8",
+            )
+            output = StringIO()
+            with redirect_stdout(output):
+                status = main(
+                    [
+                        "policy",
+                        "--config",
+                        str(path),
+                        "check",
+                        "--operation",
+                        "publish",
+                        "--resource-kind",
+                        "shared_query",
+                        "--mode",
+                        "update",
+                        "--json",
+                    ]
+                )
+
+        self.assertEqual(status, 0)
+        self.assertIn('"allowed": true', output.getvalue())
+
     def test_validate_checks_source_allowlist_without_treating_source_as_destination(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

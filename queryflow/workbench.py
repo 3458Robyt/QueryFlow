@@ -14,6 +14,7 @@ from typing import Any, Optional, Sequence
 from urllib.parse import urlparse
 from urllib.request import HTTPCookieProcessor, Request, build_opener
 
+from .gcloud import GcloudContext
 from .validation import (
     FragmentValidation,
     ValidationResult,
@@ -115,21 +116,27 @@ def _bigquery_location(workbench_location: str) -> str:
     return workbench_location
 
 
-def _resolve_gcloud_account(account: Optional[str]) -> Optional[str]:
+def _resolve_gcloud_account(account: Optional[str], *, gcloud_context: Optional[GcloudContext] = None) -> Optional[str]:
     if account:
         return account
-    listed = subprocess.run(
-        ["gcloud", "auth", "list", "--format=value(account)"],
-        check=False,
-        capture_output=True,
-        text=True,
-    )
+    if gcloud_context:
+        listed = gcloud_context.run(["auth", "list", "--format=value(account)"])
+    else:
+        listed = subprocess.run(
+            ["gcloud", "auth", "list", "--format=value(account)"],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
     candidates = [line.strip() for line in listed.stdout.splitlines() if line.strip()]
     return candidates[0] if len(candidates) == 1 else None
 
 
-def _gcloud_json(command: list[str]) -> dict[str, Any]:
-    completed = subprocess.run(command, check=False, capture_output=True, text=True)
+def _gcloud_json(command: list[str], *, gcloud_context: Optional[GcloudContext] = None) -> dict[str, Any]:
+    if gcloud_context:
+        completed = gcloud_context.run(command)
+    else:
+        completed = subprocess.run(command, check=False, capture_output=True, text=True)
     if completed.returncode != 0:
         raise WorkbenchError(
             completed.stderr.strip() or completed.stdout.strip() or "gcloud no pudo consultar Workbench",
@@ -144,8 +151,8 @@ def _gcloud_json(command: list[str]) -> dict[str, Any]:
     return value
 
 
-def _access_token(account: Optional[str]) -> str:
-    resolved_account = _resolve_gcloud_account(account)
+def _access_token(account: Optional[str], *, gcloud_context: Optional[GcloudContext] = None) -> str:
+    resolved_account = _resolve_gcloud_account(account, gcloud_context=gcloud_context)
     if resolved_account:
         command = ["gcloud", f"--account={resolved_account}", "auth", "print-access-token"]
     else:
@@ -154,7 +161,11 @@ def _access_token(account: Optional[str]) -> str:
         # user's gcloud configuration; multiple accounts still require an
         # explicit --account to avoid choosing an identity silently.
         command = ["gcloud", "auth", "print-access-token"]
-    completed = subprocess.run(command, check=False, capture_output=True, text=True)
+    completed = (
+        gcloud_context.run(command, account=resolved_account)
+        if gcloud_context
+        else subprocess.run(command, check=False, capture_output=True, text=True)
+    )
     if completed.returncode != 0 or not completed.stdout.strip():
         raise WorkbenchError(
             completed.stderr.strip() or "No se pudo obtener un token para Workbench",
@@ -163,9 +174,14 @@ def _access_token(account: Optional[str]) -> str:
     return completed.stdout.strip()
 
 
-def discover_proxy(settings: WorkbenchSettings, *, account: Optional[str] = None) -> str:
+def discover_proxy(
+    settings: WorkbenchSettings,
+    *,
+    account: Optional[str] = None,
+    gcloud_context: Optional[GcloudContext] = None,
+) -> str:
     command = ["gcloud"]
-    resolved_account = _resolve_gcloud_account(account)
+    resolved_account = _resolve_gcloud_account(account, gcloud_context=gcloud_context)
     if resolved_account:
         command.append(f"--account={resolved_account}")
     command.extend(
@@ -179,7 +195,7 @@ def discover_proxy(settings: WorkbenchSettings, *, account: Optional[str] = None
             "--format=json",
         ]
     )
-    described = _gcloud_json(command)
+    described = _gcloud_json(command, gcloud_context=gcloud_context)
     proxy = described.get("proxyUri") or described.get("proxyUriV2")
     if not proxy:
         raise WorkbenchError("La instancia Workbench no tiene proxyUri disponible", kind="transport")
@@ -516,6 +532,7 @@ def validate_workbench_fragments(
     *,
     maximum_bytes_billed: int,
     account: Optional[str] = None,
+    gcloud_context: Optional[GcloudContext] = None,
 ) -> WorkbenchValidation:
     """Run read-only dry-runs in an ephemeral Workbench kernel."""
     static = validate_sql_fragments(fragments)
@@ -524,8 +541,8 @@ def validate_workbench_fragments(
     http: Optional[_JupyterHttp] = None
     kernel_id: Optional[str] = None
     try:
-        token = _access_token(account)
-        proxy = discover_proxy(settings, account=account)
+        token = _access_token(account, gcloud_context=gcloud_context)
+        proxy = discover_proxy(settings, account=account, gcloud_context=gcloud_context)
         http = _JupyterHttp(proxy, token, timeout=settings.timeout_seconds)
         http.prepare()
         kernel_id = http.create_kernel()
@@ -590,6 +607,7 @@ def execute_workbench_sample(
     maximum_bytes_billed: int,
     limit: int,
     account: Optional[str] = None,
+    gcloud_context: Optional[GcloudContext] = None,
 ) -> dict[str, Any]:
     """Execute a bounded, explicitly approved sample inside Workbench."""
     static = validate_sql_fragments(fragments)
@@ -598,8 +616,8 @@ def execute_workbench_sample(
     http: Optional[_JupyterHttp] = None
     kernel_id: Optional[str] = None
     try:
-        token = _access_token(account)
-        proxy = discover_proxy(settings, account=account)
+        token = _access_token(account, gcloud_context=gcloud_context)
+        proxy = discover_proxy(settings, account=account, gcloud_context=gcloud_context)
         http = _JupyterHttp(proxy, token, timeout=settings.timeout_seconds)
         http.prepare()
         kernel_id = http.create_kernel()

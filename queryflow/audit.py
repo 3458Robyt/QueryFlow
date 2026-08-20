@@ -9,6 +9,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from .gcloud import GcloudContext
+
 
 class AuditError(RuntimeError):
     """The audit package could not be written or verified."""
@@ -78,11 +80,21 @@ class LocalAuditStore:
 class GcsAuditStore:
     """Upload only task artifacts to a configured Cloud Storage prefix."""
 
-    def __init__(self, root_uri: str, *, runner: Any = None) -> None:
+    def __init__(self, root_uri: str, *, runner: Any = None, gcloud_context: GcloudContext | None = None) -> None:
         if not root_uri.startswith("gs://"):
             raise AuditError("GCS audit_root debe empezar por gs://")
         self.root_uri = root_uri.rstrip("/")
-        self.runner = runner or self._run
+        self.runner = runner or (self._context_runner(gcloud_context) if gcloud_context else self._run)
+
+    @staticmethod
+    def _context_runner(context: GcloudContext) -> Any:
+        def run(command: list[str]) -> int:
+            completed = context.run(command)
+            if completed.returncode != 0:
+                raise AuditError(completed.stderr.strip() or "Falló la carga de auditoría")
+            return completed.returncode
+
+        return run
 
     @staticmethod
     def _run(command: list[str]) -> int:

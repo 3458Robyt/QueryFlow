@@ -39,13 +39,14 @@ digest; never abbreviate it when passing it to `sample` or `publish`. Add
 Install the CLI and plugin from the same Git reference, then restart Codex:
 
 ```bash
-uvx --from git+https://github.com/3458Robyt/QueryFlow.git@v0.2.0-beta.1 queryflow install
+uvx --from git+https://github.com/3458Robyt/QueryFlow.git@v0.3.0-beta.1 queryflow install
 queryflow init --profile pilot \
   --source-projects source-project \
   --destination-projects destination-project \
-  --workbench-project workbench-project \
-  --workbench-location us-east1-b \
-  --workbench-instance workbench-instance \
+  --gcloud-config-dir ~/.config/gcloud \
+  --workbench-instance-project workbench-instance-project \
+  --workbench-instance-location us-east1-b \
+  --workbench-instance-name workbench-instance \
   --workbench-job-project workbench-project
 ```
 
@@ -82,6 +83,29 @@ API, running SQL, or changing a resource.
 
 `queryflow config set` rejects credential-like keys and values. If a profile is
 invalid, stop before catalog or task operations.
+
+Keep project selection explicit and reusable:
+
+```bash
+queryflow context alias set replication replication-project
+queryflow context alias set analytics analytics-project
+queryflow context set --source replication --destination analytics
+queryflow context show --json
+queryflow permissions show --json
+queryflow permissions use full-access
+```
+
+`full-access` is not a general bypass. It only permits an explicitly ordered
+notebook/Shared Query publication without validation evidence:
+
+```bash
+queryflow publish --task TASK --force-publish \
+  --reason "Aprobación explícita del analista" \
+  --account analyst@example.com --config ~/.config/queryflow/config.toml --json
+```
+
+The command records `force-authorization.json`, verifies the remote head and
+reads the published file back. It never runs SQL or changes schedules.
 
 ## Discover resources
 

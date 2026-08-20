@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, Optional
 
 from .catalog import ResourceRef
+from .gcloud import GcloudContext
 
 
 class DataformError(RuntimeError):
@@ -32,20 +33,16 @@ Transport = Callable[[str, str, dict[str, Any], Optional[dict[str, Any]]], dict[
 
 
 class TokenProvider:
-    def __init__(self, account: str) -> None:
+    def __init__(self, account: str, *, context: Optional[GcloudContext] = None) -> None:
         self.account = account
+        self.context = context or GcloudContext.default(account=account)
         self._token = ""
         self._created_at = 0.0
 
     def get(self) -> str:
         if self._token and time.monotonic() - self._created_at < 3000:
             return self._token
-        completed = subprocess.run(
-            ["gcloud", f"--account={self.account}", "auth", "print-access-token"],
-            check=False,
-            capture_output=True,
-            text=True,
-        )
+        completed = self.context.run(["auth", "print-access-token"], account=self.account)
         if completed.returncode != 0 or not completed.stdout.strip():
             raise DataformError("No fue posible obtener un token de Dataform")
         self._token = completed.stdout.strip()
@@ -62,13 +59,18 @@ class DataformClient:
         allowed_write_project: str,
         *,
         source_project: str = "",
+        gcloud_context: Optional[GcloudContext] = None,
         transport: Optional[Transport] = None,
     ) -> None:
         self.account = account
         self.allowed_write_project = allowed_write_project
         self.source_project = source_project
         self._transport = transport
-        self._tokens = TokenProvider(account)
+        self._tokens = TokenProvider(account, context=gcloud_context)
+
+    def set_gcloud_context(self, context: GcloudContext) -> None:
+        """Update the credential context without changing the client API."""
+        self._tokens.context = context
 
     def _request_http(
         self,

@@ -24,11 +24,11 @@ No pegues tokens en el README, en la configuración ni en una conversación.
 
 ### Instalación
 
-La beta disponible para el equipo es `v0.2.0-beta.1`:
+La beta disponible para el equipo es `v0.3.0-beta.1`:
 
 ```bash
-uvx --from git+https://github.com/3458Robyt/QueryFlow.git@v0.2.0-beta.1 \
-  queryflow install --ref v0.2.0-beta.1
+uvx --from git+https://github.com/3458Robyt/QueryFlow.git@v0.3.0-beta.1 \
+  queryflow install --ref v0.3.0-beta.1
 queryflow init --profile pilot
 ```
 
@@ -44,11 +44,12 @@ valores siguientes son ejemplos; sustitúyelos por los de tu equipo:
 ```bash
 queryflow init --profile pilot \
   --account analyst@example.com \
+  --gcloud-config-dir ~/.config/gcloud \
   --source-projects SOURCE_PROJECT \
   --destination-projects DESTINATION_PROJECT \
-  --workbench-project WORKBENCH_PROJECT \
-  --workbench-location us-east1-b \
-  --workbench-instance WORKBENCH_INSTANCE \
+  --workbench-instance-project WORKBENCH_INSTANCE_PROJECT \
+  --workbench-instance-location us-east1-b \
+  --workbench-instance-name WORKBENCH_INSTANCE \
   --workbench-job-project WORKBENCH_JOB_PROJECT \
   --validation-backend workbench \
   --json
@@ -68,6 +69,34 @@ queryflow config set preferences.review_mode unified --json
 
 La configuración se guarda en `~/.config/queryflow/config.toml`. Contiene
 preferencias y límites, nunca secretos.
+
+### Contexto y permisos
+
+Guarda alias para no repetir IDs y selecciona un flujo de migración sin tocar
+los recursos remotos:
+
+```bash
+queryflow context alias set replication REPLICATION_PROJECT
+queryflow context alias set analytics ANALYTICS_PROJECT
+queryflow context set --source replication --destination analytics
+queryflow context show --json
+```
+
+Los perfiles disponibles son `pilot` (solo copias), `team` (actualizaciones
+aprobadas) y `full-access`. Este último no ejecuta SQL ni elimina recursos;
+permite publicar un notebook o Shared Query con una orden explícita cuando el
+dry-run no está disponible:
+
+```bash
+queryflow permissions use full-access --config ~/.config/queryflow/config.toml
+queryflow publish --task TASK --force-publish \
+  --reason "Aprobación explícita del analista: incidencia VPC" \
+  --account analyst@example.com --config ~/.config/queryflow/config.toml
+```
+
+La publicación force exige recurso canónico, destino permitido, control de
+conflictos, auditoría y lectura de comprobación. Genera
+`force-authorization.json`; el flujo normal continúa usando digest.
 
 ## Flujo de trabajo
 
@@ -167,6 +196,8 @@ mutante automáticamente.
   tareas, skills o auditorías.
 - Las consultas mutantes, dinámicas, ambiguas o con varias sentencias se
   detienen para revisión.
+- La ruta de credenciales de gcloud es persistente (`~/.config/gcloud`); una
+  variable `CLOUDSDK_CONFIG` temporal heredada no reemplaza esa configuración.
 - Las muestras reales deben ejecutarse dentro del perímetro Workbench
   configurado y requieren confirmación explícita.
 - El diccionario de migración y la reescritura de rutas son procesos separados;

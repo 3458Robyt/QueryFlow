@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import os
 import tomllib
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -15,7 +15,7 @@ class ConfigStoreError(RuntimeError):
 
 
 FORBIDDEN_KEYS = {"token", "access_token", "refresh_token", "password", "secret", "private_key"}
-CURRENT_SCHEMA_VERSION = 2
+CURRENT_SCHEMA_VERSION = 3
 DEFAULT_PREFERENCES = {
     "review_theme": "dark",
     "review_mode": "unified",
@@ -30,6 +30,8 @@ class ConfigDocument:
     active_profile: str
     profiles: dict[str, dict[str, Any]]
     preferences: dict[str, Any]
+    project_aliases: dict[str, str] = field(default_factory=dict)
+    context: dict[str, str] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -37,6 +39,8 @@ class ConfigDocument:
             "active_profile": self.active_profile,
             "profiles": self.profiles,
             "preferences": self.preferences,
+            "project_aliases": self.project_aliases,
+            "context": self.context,
         }
 
 
@@ -46,7 +50,7 @@ class ConfigStore:
 
     def load(self) -> ConfigDocument:
         if not self.path.exists():
-            return ConfigDocument(CURRENT_SCHEMA_VERSION, "pilot", {}, dict(DEFAULT_PREFERENCES))
+            return ConfigDocument(CURRENT_SCHEMA_VERSION, "pilot", {}, dict(DEFAULT_PREFERENCES), {}, {})
         try:
             raw = tomllib.loads(self.path.read_text(encoding="utf-8"))
         except (OSError, tomllib.TOMLDecodeError) as error:
@@ -58,11 +62,28 @@ class ConfigStore:
         if not isinstance(profiles, dict) or not isinstance(preferences, dict):
             raise ConfigStoreError("profiles y preferences deben ser tablas TOML")
         preferences = {**DEFAULT_PREFERENCES, **dict(preferences)}
+        aliases = raw.get("project_aliases") or {}
+        context = raw.get("context") or {}
+        if not isinstance(aliases, dict) or not isinstance(context, dict):
+            raise ConfigStoreError("project_aliases y context deben ser tablas TOML")
+        project_aliases = {str(key): str(value) for key, value in aliases.items()}
+        project_context = {
+            str(key): str(value)
+            for key, value in context.items()
+            if str(key) in {"source_project", "destination_project"} and value
+        }
+        raw_schema_version = int(raw.get("schema_version", 1))
+        # Preserve the v1 compatibility marker expected by older task/config
+        # readers; any newly written or already-v2 document is upgraded to the
+        # context-aware schema v3.
+        schema_version = 2 if raw_schema_version <= 1 else max(raw_schema_version, CURRENT_SCHEMA_VERSION)
         return ConfigDocument(
-            schema_version=max(int(raw.get("schema_version", 1)), CURRENT_SCHEMA_VERSION),
+            schema_version=schema_version,
             active_profile=str(raw.get("active_profile", "pilot")),
             profiles={str(key): dict(value) for key, value in profiles.items() if isinstance(value, dict)},
             preferences=preferences,
+            project_aliases=project_aliases,
+            context=project_context,
         )
 
     def initialize(self, *, profile: str, values: dict[str, Any], preferences: dict[str, Any] | None = None) -> ConfigDocument:
@@ -75,6 +96,8 @@ class ConfigStore:
             active_profile=profile,
             profiles=profiles,
             preferences={**DEFAULT_PREFERENCES, **document.preferences, **(preferences or {})},
+            project_aliases=dict(document.project_aliases),
+            context=dict(document.context),
         )
         self.write(merged)
         return merged
@@ -98,6 +121,61 @@ class ConfigStore:
             active_profile=str(data.get("active_profile", "pilot")),
             profiles=dict(data.get("profiles") or {}),
             preferences={**DEFAULT_PREFERENCES, **dict(data.get("preferences") or {})},
+            project_aliases={str(key): str(item) for key, item in (data.get("project_aliases") or {}).items()},
+            context={str(key): str(item) for key, item in (data.get("context") or {}).items()},
+        )
+        self.write(updated)
+        return updated
+
+    def activate_profile(self, profile: str) -> ConfigDocument:
+        document = self.load()
+        if profile not in document.profiles:
+            raise ConfigStoreError(f"No existe el perfil: {profile}")
+        updated = ConfigDocument(
+            schema_version=max(document.schema_version, CURRENT_SCHEMA_VERSION),
+            active_profile=profile,
+            profiles=dict(document.profiles),
+            preferences=dict(document.preferences),
+            project_aliases=dict(document.project_aliases),
+            context=dict(document.context),
+        )
+        self.write(updated)
+        return updated
+
+    def set_context(self, *, source_project: str, destination_project: str) -> ConfigDocument:
+        document = self.load()
+        context = {
+            "source_project": source_project,
+            "destination_project": destination_project,
+        }
+        updated = ConfigDocument(
+            schema_version=max(document.schema_version, CURRENT_SCHEMA_VERSION),
+            active_profile=document.active_profile,
+            profiles=dict(document.profiles),
+            preferences=dict(document.preferences),
+            project_aliases=dict(document.project_aliases),
+            context=context,
+        )
+        self.write(updated)
+        return updated
+
+    def set_alias(self, alias: str, project: str) -> ConfigDocument:
+        alias = str(alias).strip()
+        project = str(project).strip()
+        if not alias or not project or any(char not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-" for char in alias):
+            raise ConfigStoreError("El alias debe ser un identificador simple y el proyecto no puede estar vacío")
+        if "=" in project or any(char.isspace() for char in project):
+            raise ConfigStoreError("El proyecto no puede contener espacios ni '='")
+        document = self.load()
+        aliases = dict(document.project_aliases)
+        aliases[alias] = project
+        updated = ConfigDocument(
+            schema_version=max(document.schema_version, CURRENT_SCHEMA_VERSION),
+            active_profile=document.active_profile,
+            profiles=dict(document.profiles),
+            preferences=dict(document.preferences),
+            project_aliases=aliases,
+            context=dict(document.context),
         )
         self.write(updated)
         return updated

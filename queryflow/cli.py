@@ -4,6 +4,7 @@ import argparse
 import hashlib
 import importlib.util
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -34,6 +35,7 @@ from .errors import (
     write_diagnostic,
 )
 from .dataform import DataformClient, ExportedAsset, DataformError
+from .gcloud import GcloudContext
 from .notebooks import (
     analyze_sql_fragments,
     empty_notebook,
@@ -78,6 +80,17 @@ def _config(args: argparse.Namespace) -> QueryflowConfig:
     return load_config(Path(args.config) if getattr(args, "config", None) else None)
 
 
+def _gcloud_context(config: QueryflowConfig, account: Optional[str] = None) -> GcloudContext:
+    return GcloudContext(config.gcloud_config_dir, account=account or config.account)
+
+
+def _configure_dataform_client(client: Any, config: QueryflowConfig, account: Optional[str]) -> Any:
+    setter = getattr(client, "set_gcloud_context", None)
+    if callable(setter):
+        setter(_gcloud_context(config, account))
+    return client
+
+
 def _effective_max_bytes(args: argparse.Namespace, config: QueryflowConfig) -> int:
     requested = getattr(args, "max_bytes", None)
     if requested is not None and requested > config.policy_max_bytes:
@@ -93,7 +106,8 @@ def _modern_policy(config: QueryflowConfig) -> Policy:
         default_max_bytes=config.profile_max_bytes,
         sample_default_rows=config.sample_default_rows,
         sample_max_rows=config.sample_max_rows,
-        allow_update_existing=config.allow_update_existing and config.mode == "team",
+        allow_update_existing=config.allow_update_existing and config.mode in {"team", "full-access"},
+        allow_force_publish=config.allow_force_publish and config.mode == "full-access",
         allow_static_exception=config.allow_static_exception and config.mode == "team",
         allowed_resource_kinds=("notebook", "shared_query"),
         allowed_source_projects=config.source_projects,
@@ -132,27 +146,53 @@ def _cmd_version(args: argparse.Namespace) -> int:
 def _cmd_init(args: argparse.Namespace) -> int:
     path = Path(args.path).expanduser() if args.path else default_config_path()
     profile = args.profile or "pilot"
-    if profile not in {"pilot", "team"}:
-        raise CliError("--profile debe ser pilot o team")
+    if profile not in {"pilot", "team", "full-access"}:
+        raise CliError("--profile debe ser pilot, team o full-access")
+    aliases: dict[str, str] = {}
+    for raw_alias in args.project_alias or []:
+        if "=" not in raw_alias:
+            raise CliError("--project-alias debe tener formato alias=PROJECT_ID")
+        alias, project = raw_alias.split("=", 1)
+        if not alias.strip() or not project.strip():
+            raise CliError("--project-alias debe tener formato alias=PROJECT_ID")
+        aliases[alias.strip()] = project.strip()
     values = {
         "mode": profile,
         "account": args.account or "",
+        "gcloud_config_dir": args.gcloud_config_dir or str(Path.home() / ".config" / "gcloud"),
         "source_projects": [item for item in (args.source_projects or "").split(",") if item.strip()],
         "destination_projects": [item for item in (args.destination_projects or "").split(",") if item.strip()],
-        "workbench_project": args.workbench_project or "",
-        "workbench_location": args.workbench_location or "",
-        "workbench_instance": args.workbench_instance or "",
+        "workbench_instance_project": args.workbench_instance_project or args.workbench_project or "",
+        "workbench_instance_location": args.workbench_instance_location or args.workbench_location or "",
+        "workbench_instance_name": args.workbench_instance_name or args.workbench_instance or "",
         "workbench_job_project": args.workbench_job_project or "",
         "validation_backend": args.validation_backend or "workbench",
         "max_bytes": args.max_bytes or 5 * 1024 * 1024 * 1024,
         "sample_default_rows": 3,
         "sample_max_rows": 5,
+        "allow_update_existing": profile in {"team", "full-access"},
+        "allow_force_publish": profile == "full-access",
     }
     try:
-        document = ConfigStore(path).initialize(profile=profile, values=values)
+        store = ConfigStore(path)
+        document = store.initialize(profile=profile, values=values)
+        for alias, project in aliases.items():
+            document = store.set_alias(alias, project)
+        if args.source_project or args.destination_project:
+            source = args.source_project or args.destination_project
+            destination = args.destination_project or args.source_project
+            if not source or not destination:
+                raise CliError("--source-project y --destination-project deben ir juntos")
+            document = store.set_context(source_project=source, destination_project=destination)
     except ConfigStoreError as error:
         raise CliError(str(error)) from error
-    payload = {"path": str(path), "active_profile": document.active_profile, "profiles": document.profiles}
+    payload = {
+        "path": str(path),
+        "active_profile": document.active_profile,
+        "profiles": document.profiles,
+        "project_aliases": document.project_aliases,
+        "context": document.context,
+    }
     _print_result(payload, args.json)
     return 0
 
@@ -185,6 +225,104 @@ def _cmd_config(args: argparse.Namespace) -> int:
         _print_result(current, args.json)
         return 0
     raise CliError(f"Comando config no soportado: {args.config_command}")
+
+
+def _resolve_project_reference(document: Any, value: str) -> str:
+    aliases = getattr(document, "project_aliases", {}) or {}
+    if value in aliases:
+        return aliases[value]
+    if value in aliases.values() or re.fullmatch(r"[a-z][a-z0-9-]{4,29}", value):
+        return value
+    raise CliError(f"No existe el alias de proyecto: {value}")
+
+
+def _resolve_config_project(config: QueryflowConfig, value: Optional[str]) -> Optional[str]:
+    if not value:
+        return None
+    aliases = config.project_aliases
+    if value in aliases:
+        return aliases[value]
+    if value in aliases.values() or re.fullmatch(r"[a-z][a-z0-9-]{4,29}", value):
+        return value
+    raise CliError(f"No existe el alias de proyecto: {value}")
+
+
+def _active_destination(config: QueryflowConfig) -> Optional[str]:
+    return _resolve_config_project(config, config.context_destination_project)
+
+
+def _active_source(config: QueryflowConfig) -> Optional[str]:
+    return _resolve_config_project(config, config.context_source_project)
+
+
+def _cmd_context(args: argparse.Namespace) -> int:
+    store = ConfigStore(Path(args.config).expanduser() if args.config else default_config_path())
+    try:
+        document = store.load()
+        if args.context_command == "show":
+            _print_result(
+                {
+                    "source_project": document.context.get("source_project"),
+                    "destination_project": document.context.get("destination_project"),
+                    "project_aliases": document.project_aliases,
+                },
+                args.json,
+            )
+            return 0
+        if args.context_command == "use":
+            project = _resolve_project_reference(document, args.project)
+            updated = store.set_context(source_project=project, destination_project=project)
+        elif args.context_command == "set":
+            updated = store.set_context(
+                source_project=_resolve_project_reference(document, args.source),
+                destination_project=_resolve_project_reference(document, args.destination),
+            )
+        elif args.context_command == "alias":
+            if args.alias_command == "set":
+                updated = store.set_alias(args.alias, args.project)
+            elif args.alias_command == "list":
+                _print_result(document.project_aliases, args.json)
+                return 0
+            else:
+                raise CliError(f"Comando context alias no soportado: {args.alias_command}")
+        else:
+            raise CliError(f"Comando context no soportado: {args.context_command}")
+    except ConfigStoreError as error:
+        raise CliError(str(error)) from error
+    _print_result({"context": updated.context, "project_aliases": updated.project_aliases}, args.json)
+    return 0
+
+
+def _cmd_permissions(args: argparse.Namespace) -> int:
+    store = ConfigStore(Path(args.config).expanduser() if args.config else default_config_path())
+    try:
+        if args.permissions_command == "show":
+            document = store.load()
+            profile_summary = {
+                name: {
+                    "mode": values.get("mode", name),
+                    "allow_update_existing": bool(values.get("allow_update_existing", False)),
+                    "allow_force_publish": bool(values.get("allow_force_publish", False)),
+                    "validation_backend": values.get("validation_backend", "workbench"),
+                }
+                for name, values in document.profiles.items()
+            }
+            _print_result(
+                {
+                    "active_profile": document.active_profile,
+                    "profiles": sorted(document.profiles),
+                    "profile_details": profile_summary,
+                },
+                args.json,
+            )
+            return 0
+        if args.permissions_command != "use":
+            raise CliError(f"Comando permissions no soportado: {args.permissions_command}")
+        updated = store.activate_profile(args.profile)
+    except ConfigStoreError as error:
+        raise CliError(str(error)) from error
+    _print_result({"active_profile": updated.active_profile, "profiles": sorted(updated.profiles)}, args.json)
+    return 0
 
 
 def _cmd_policy(args: argparse.Namespace) -> int:
@@ -246,9 +384,9 @@ def _cmd_self_update(args: argparse.Namespace) -> int:
     return 0
 
 
-def _audit_store(value: str) -> Any:
+def _audit_store(value: str, *, gcloud_context: Optional[GcloudContext] = None) -> Any:
     if value.startswith("gs://"):
-        return GcsAuditStore(value)
+        return GcsAuditStore(value, gcloud_context=gcloud_context)
     return LocalAuditStore(Path(value).expanduser())
 
 
@@ -376,6 +514,8 @@ def _gcloud_services_probe(
     project: str,
     required_apis: list[str],
     acceptable_any: list[str] | None = None,
+    *,
+    gcloud_context: Optional[GcloudContext] = None,
 ) -> dict[str, Any]:
     """Check enabled APIs without changing the project."""
     if not shutil.which("gcloud"):
@@ -392,18 +532,17 @@ def _gcloud_services_probe(
             "provider": {"identifiers": {}},
             "error": "gcloud no está instalado",
         }
-    completed = subprocess.run(
-        [
-            "gcloud",
-            "services",
-            "list",
-            f"--project={project}",
-            "--enabled",
-            "--format=value(config.name)",
-        ],
-        check=False,
-        capture_output=True,
-        text=True,
+    command = [
+        "services",
+        "list",
+        f"--project={project}",
+        "--enabled",
+        "--format=value(config.name)",
+    ]
+    completed = (
+        gcloud_context.run(command)
+        if gcloud_context
+        else subprocess.run(["gcloud", *command], check=False, capture_output=True, text=True)
     )
     enabled = sorted({line.strip() for line in completed.stdout.splitlines() if line.strip()})
     alternatives = acceptable_any or []
@@ -426,7 +565,11 @@ def _gcloud_services_probe(
     }
 
 
-def _gcloud_workbench_probe(config: QueryflowConfig) -> dict[str, Any]:
+def _gcloud_workbench_probe(
+    config: QueryflowConfig,
+    *,
+    gcloud_context: Optional[GcloudContext] = None,
+) -> dict[str, Any]:
     """Describe the configured Workbench instance using read-only commands."""
     if not shutil.which("gcloud"):
         return {
@@ -450,14 +593,16 @@ def _gcloud_workbench_probe(config: QueryflowConfig) -> dict[str, Any]:
         "--format=json",
     ]
     attempts = [
-        ["gcloud", "workbench", "instances", "describe", str(config.workbench_instance), *common],
-        # Older Cloud SDK installations expose the same API under notebooks.
-        ["gcloud", "notebooks", "instances", "describe", str(config.workbench_instance), *common],
+        ["workbench", "instances", "describe", str(config.workbench_instance), *common],
     ]
     failures: list[str] = []
     identifiers: dict[str, str] = {}
     for command in attempts:
-        completed = subprocess.run(command, check=False, capture_output=True, text=True)
+        completed = (
+            gcloud_context.run(command)
+            if gcloud_context
+            else subprocess.run(["gcloud", *command], check=False, capture_output=True, text=True)
+        )
         if completed.returncode == 0:
             return {
                 "attempted": True,
@@ -470,6 +615,27 @@ def _gcloud_workbench_probe(config: QueryflowConfig) -> dict[str, Any]:
         if completed.stderr.strip():
             failures.append(redact_message(completed.stderr))
             identifiers.update(provider_identifiers(completed.stderr))
+        lowered = completed.stderr.casefold()
+        if any(token in lowered for token in ("invalid choice", "unknown command", "command not found")):
+            legacy = ["notebooks", "instances", "describe", str(config.workbench_instance), *common]
+            completed = (
+                gcloud_context.run(legacy)
+                if gcloud_context
+                else subprocess.run(["gcloud", *legacy], check=False, capture_output=True, text=True)
+            )
+            if completed.returncode == 0:
+                return {
+                    "attempted": True,
+                    "ok": True,
+                    "command": "gcloud notebooks instances describe",
+                    "project": config.workbench_project,
+                    "location": config.workbench_location,
+                    "instance": config.workbench_instance,
+                }
+            if completed.stderr.strip():
+                failures.append(redact_message(completed.stderr))
+                identifiers.update(provider_identifiers(completed.stderr))
+            break
     error = failures[-1] if failures else "No se pudo describir la instancia Workbench"
     return {
         "attempted": True,
@@ -485,15 +651,11 @@ def _gcloud_workbench_probe(config: QueryflowConfig) -> dict[str, Any]:
 
 def _cmd_doctor(args: argparse.Namespace) -> int:
     config = _config(args)
+    gcloud_context = _gcloud_context(config)
     auth_accounts: list[str] = []
     auth_error = ""
     if shutil.which("gcloud"):
-        completed = subprocess.run(
-            ["gcloud", "auth", "list", "--format=value(account)"],
-            check=False,
-            capture_output=True,
-            text=True,
-        )
+        completed = gcloud_context.run(["auth", "list", "--format=value(account)"])
         auth_accounts = [line.strip() for line in completed.stdout.splitlines() if line.strip()]
         auth_error = redact_message(completed.stderr) if completed.returncode != 0 else ""
     workbench_config = {
@@ -501,6 +663,10 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
         "location": bool(config.workbench_location),
         "instance": bool(config.workbench_instance),
         "job_project": bool(config.workbench_job_project),
+        "instance_project": config.workbench_instance_project,
+        "instance_location": config.workbench_instance_location,
+        "instance_name": config.workbench_instance_name,
+        "configured_job_project": config.workbench_job_project,
     }
     checks: dict[str, Any] = {
         "python": sys.version.split()[0],
@@ -520,6 +686,12 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
         "profile": config.profile_name,
         "policy_max_bytes": config.policy_max_bytes,
         "gcloud_auth": {"ok": bool(auth_accounts), "accounts": len(auth_accounts), "error": auth_error},
+        "gcloud_config": {
+            "configured": str(config.gcloud_config_dir),
+            "account": config.account,
+            "inherited": os.environ.get("CLOUDSDK_CONFIG"),
+            "temporary_inherited": bool(os.environ.get("CLOUDSDK_CONFIG", "").startswith("/tmp/")),
+        },
         "workbench_config": {**workbench_config, "ok": all(workbench_config.values())},
         "preferences": {
             "review_theme": config.review_theme,
@@ -544,7 +716,7 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
             else []
         )
         api_project = config.workbench_project or (config.destination_projects[0] if config.destination_projects else "")
-        checks["apis"] = _gcloud_services_probe(api_project, required_apis, acceptable_any) if api_project else {
+        checks["apis"] = _gcloud_services_probe(api_project, required_apis, acceptable_any, gcloud_context=gcloud_context) if api_project else {
             "attempted": False,
             "ok": False,
             "required": required_apis,
@@ -557,7 +729,7 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
             "error": "No hay proyecto configurado para consultar APIs",
         }
         checks["workbench_connectivity"] = (
-            _gcloud_workbench_probe(config)
+            _gcloud_workbench_probe(config, gcloud_context=gcloud_context)
             if config.validation_backend == "workbench"
             else {"attempted": False, "ok": True, "skipped": True}
         )
@@ -699,7 +871,11 @@ def _cmd_exception_prepare(args: argparse.Namespace) -> int:
 def _cmd_catalog_refresh(args: argparse.Namespace) -> int:
     config = _config(args)
     projects = args.projects or None
-    catalog = refresh_catalog(projects=projects, account=args.account)
+    catalog = refresh_catalog(
+        projects=projects,
+        account=args.account or config.account,
+        gcloud_context=_gcloud_context(config, args.account or config.account),
+    )
     catalog_path = Path(args.catalog_path) if args.catalog_path else config.catalog_path
     result = {"catalog": str(catalog_path), "resources": len(catalog.resources), "warnings": catalog.warnings}
     _print_result(result, args.json)
@@ -744,6 +920,7 @@ def _cmd_profile(args: argparse.Namespace) -> int:
             location=args.location,
             execute=args.execute,
             maximum_bytes_billed=min(args.max_bytes, config.policy_max_bytes),
+            gcloud_context=_gcloud_context(config, getattr(args, "account", None) or config.account),
         )
     except ProfileError as error:
         raise CliError(str(error)) from error
@@ -763,7 +940,20 @@ def _cmd_profile(args: argparse.Namespace) -> int:
     return 0 if not result.dry_run.errors else 2
 
 
-def _load_content(args: argparse.Namespace, resource: ResourceRef) -> tuple[bytes, str, dict[str, Any], str]:
+def _load_content(
+    args: argparse.Namespace,
+    resource: ResourceRef,
+    *,
+    config: QueryflowConfig,
+    destination_project: Optional[str] = None,
+) -> tuple[bytes, str, dict[str, Any], str]:
+    # Catalog entries created from local input do not have a remote head to
+    # export.  Treat them as an empty local workspace, just like ``--mode
+    # new``; this also keeps context-only starts independent of credentials.
+    if resource.fingerprint == "local-input" and not args.content_file:
+        if resource.kind == "notebook":
+            return empty_notebook(), "content.ipynb", {}, "local-input"
+        return b"", "content.sql", {}, "local-input"
     if args.mode == "new" and not args.content_file:
         if resource.kind == "notebook":
             return empty_notebook(), "content.ipynb", {}, "local-input"
@@ -776,7 +966,11 @@ def _load_content(args: argparse.Namespace, resource: ResourceRef) -> tuple[byte
             raise CliError(f"No se pudo leer --content-file: {error}") from error
     if not args.account:
         raise CliError("--account es obligatorio cuando se exporta un recurso remoto")
-    client = DataformClient(args.account, args.destination_project or resource.project)
+    client = _configure_dataform_client(
+        DataformClient(args.account, destination_project or resource.project),
+        config,
+        args.account,
+    )
     try:
         exported = client.export(resource)
     except DataformError as error:
@@ -816,6 +1010,14 @@ def _cmd_start(args: argparse.Namespace) -> int:
     if args.resource:
         catalog = load_catalog(config.catalog_path)
     resource = _resource_from_args(args, catalog)
+    destination_project = _resolve_config_project(config, args.destination_project) or _active_destination(config)
+    if not destination_project:
+        # A canonical resource carries its source project, which is also the
+        # safe default destination for backwards-compatible local starts.
+        # An explicit context or --destination-project still takes priority.
+        destination_project = resource.project
+    if not destination_project:
+        raise CliError("No hay proyecto destino; use --destination-project o configure context")
     if config.policy_enforced:
         decision = evaluate_policy(
             _modern_policy(config),
@@ -823,7 +1025,7 @@ def _cmd_start(args: argparse.Namespace) -> int:
             resource_kind=resource.kind,
             mode=args.mode,
             source_project=resource.project,
-            destination_project=args.destination_project,
+            destination_project=destination_project,
             location=resource.location,
         )
         if not decision.allowed:
@@ -835,7 +1037,12 @@ def _cmd_start(args: argparse.Namespace) -> int:
         )
     if resource.kind == "scheduled_query" and schedule_spec is None:
         raise CliError("scheduled_query requiere especificación de programación")
-    content, filename, metadata, head = _load_content(args, resource)
+    content, filename, metadata, head = _load_content(
+        args,
+        resource,
+        config=config,
+        destination_project=destination_project,
+    )
     if args.task_id:
         task_id = args.task_id
     else:
@@ -860,6 +1067,14 @@ def _cmd_start(args: argparse.Namespace) -> int:
         filename=filename,
         mode=args.mode,
         account=args.account,
+    )
+    update_manifest(
+        task,
+        destination_project=destination_project,
+        project_context={
+            "source_project": _active_source(config) or resource.project,
+            "destination_project": destination_project,
+        },
     )
     if schedule_spec is not None:
         (task / filename).write_bytes(content)
@@ -928,6 +1143,7 @@ def _cmd_validate(args: argparse.Namespace) -> int:
             raise CliError(str(error)) from error
     project_id = manifest.get("resource", {}).get("project")
     account = args.account or manifest.get("account")
+    gcloud_context = _gcloud_context(config, account)
     extraction: dict[str, Any] | None = None
     if is_notebook:
         filename = str(manifest["filename"])
@@ -962,9 +1178,9 @@ def _cmd_validate(args: argparse.Namespace) -> int:
     else:
         if backend == "workbench":
             required = {
-                "workbench_project": config.workbench_project,
-                "workbench_location": config.workbench_location,
-                "workbench_instance": config.workbench_instance,
+                "workbench_instance_project": config.workbench_instance_project,
+                "workbench_instance_location": config.workbench_instance_location,
+                "workbench_instance_name": config.workbench_instance_name,
                 "workbench_job_project": config.workbench_job_project,
             }
             missing = [name for name, value in required.items() if not value]
@@ -984,6 +1200,7 @@ def _cmd_validate(args: argparse.Namespace) -> int:
                 settings,
                 maximum_bytes_billed=_effective_max_bytes(args, config),
                 account=account,
+                gcloud_context=gcloud_context,
             )
             result = workbench.result
             backend_details = workbench.backend_details
@@ -995,6 +1212,7 @@ def _cmd_validate(args: argparse.Namespace) -> int:
                     project_id=project_id,
                     maximum_bytes_billed=_effective_max_bytes(args, config),
                     account=account,
+                    gcloud_context=gcloud_context,
                 )
             else:
                 result = dry_run_sql(
@@ -1003,6 +1221,7 @@ def _cmd_validate(args: argparse.Namespace) -> int:
                     project_id=project_id,
                     maximum_bytes_billed=_effective_max_bytes(args, config),
                     account=account,
+                    gcloud_context=gcloud_context,
                 )
         dry = result.to_dict()
     dry_errors = dry.get("errors")
@@ -1023,6 +1242,7 @@ def _cmd_validate(args: argparse.Namespace) -> int:
                 project_id=project_id,
                 maximum_bytes_billed=_effective_max_bytes(args, config),
                 account=account,
+                gcloud_context=gcloud_context,
             )
         else:
             executed = execute_read_only_sql(
@@ -1031,6 +1251,7 @@ def _cmd_validate(args: argparse.Namespace) -> int:
                 project_id=project_id,
                 maximum_bytes_billed=_effective_max_bytes(args, config),
                 account=account,
+                gcloud_context=gcloud_context,
             )
         # Never persist returned rows in validation.json or the audit package.
         # The optional execution is for a bounded smoke check; only its outcome
@@ -1133,9 +1354,9 @@ def _cmd_sample(args: argparse.Namespace) -> int:
     if (args.backend or config.validation_backend) != "workbench":
         raise CliError("La ejecución muestral solo está habilitada dentro de Workbench")
     required = {
-        "workbench_project": config.workbench_project,
-        "workbench_location": config.workbench_location,
-        "workbench_instance": config.workbench_instance,
+        "workbench_instance_project": config.workbench_instance_project,
+        "workbench_instance_location": config.workbench_instance_location,
+        "workbench_instance_name": config.workbench_instance_name,
         "workbench_job_project": config.workbench_job_project,
     }
     missing = [name for name, value in required.items() if not value]
@@ -1154,6 +1375,7 @@ def _cmd_sample(args: argparse.Namespace) -> int:
         maximum_bytes_billed=_effective_max_bytes(args, config),
         limit=limit,
         account=args.account or manifest.get("account"),
+        gcloud_context=_gcloud_context(config, args.account or manifest.get("account")),
     )
     receipt = {
         "executed_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
@@ -1259,7 +1481,7 @@ def _publish_scheduled_query(
     if audit_root is None:
         raise CliError("audit_root inválido")
     try:
-        audit_store = _audit_store(audit_root)
+        audit_store = _audit_store(audit_root, gcloud_context=_gcloud_context(config, args.account))
         audit_receipt = audit_store.archive(task)
     except AuditError as error:
         raise CliError(str(error)) from error
@@ -1356,13 +1578,24 @@ def _cmd_publish(args: argparse.Namespace) -> int:
     config = _config(args)
     task = Path(args.task).resolve()
     manifest = read_manifest(task)
-    validation_path = task / "validation.json"
-    if not validation_path.exists():
-        raise CliError("La tarea no tiene validation.json")
-    validation = json.loads(validation_path.read_text(encoding="utf-8"))
-    if bool(args.approved_digest) == bool(args.approved_exception_digest):
-        raise CliError("Publica con exactamente uno de --approved-digest o --approved-exception-digest")
-    exception_used = bool(args.approved_exception_digest)
+    force_published = bool(getattr(args, "force_publish", False))
+    if force_published:
+        if config.mode != "full-access" or not config.allow_force_publish:
+            raise CliError("--force-publish requiere el perfil full-access y allow_force_publish: true")
+        if not str(getattr(args, "reason", "") or "").strip():
+            raise CliError("--force-publish requiere --reason con la autorización del analista")
+        if args.approved_digest or args.approved_exception_digest:
+            raise CliError("--force-publish no se combina con un digest de aprobación")
+        validation = _load_validation(task)
+        exception_used = False
+    else:
+        validation_path = task / "validation.json"
+        if not validation_path.exists():
+            raise CliError("La tarea no tiene validation.json")
+        validation = json.loads(validation_path.read_text(encoding="utf-8"))
+        if bool(args.approved_digest) == bool(args.approved_exception_digest):
+            raise CliError("Publica con exactamente uno de --approved-digest o --approved-exception-digest")
+        exception_used = bool(args.approved_exception_digest)
     if exception_used:
         if config.mode != "team" or not config.allow_static_exception:
             raise CliError("La publicación por excepción requiere perfil team y allow_static_exception: true")
@@ -1404,7 +1637,7 @@ def _cmd_publish(args: argparse.Namespace) -> int:
         blocker = str(exception.get("blocker_category") or "")
         if blocker not in {"authentication", "vpc", "network"}:
             raise CliError(f"El bloqueo {blocker} no admite excepción estática")
-    else:
+    elif not force_published:
         expected = manifest.get("approval_digest")
         if manifest.get("validation_status") != "ready" or not validation_is_publishable(validation):
             raise CliError("La tarea no está en estado ready")
@@ -1415,12 +1648,17 @@ def _cmd_publish(args: argparse.Namespace) -> int:
     mode = manifest.get("mode")
     if mode not in {"copy", "new", "update"}:
         raise CliError("La tarea tiene un modo de publicación no soportado")
-    destination_project = args.destination_project
+    resource = ResourceRef.from_dict(manifest["resource"])
+    destination_project = args.destination_project or manifest.get("destination_project") or resource.project
+    if destination_project in config.project_aliases:
+        destination_project = config.project_aliases[destination_project]
     if not destination_project:
-        raise CliError("--destination-project es obligatorio")
+        raise CliError("No hay proyecto destino; usa --destination-project o crea la tarea con un contexto")
     if not args.account:
         raise CliError("--account es obligatorio para publicar")
-    resource = ResourceRef.from_dict(manifest["resource"])
+    # Keep the scheduled-query helper's historical interface while ensuring
+    # the destination is resolved from the task snapshot when omitted.
+    args.destination_project = destination_project
     if config.policy_enforced:
         decision = evaluate_policy(
             _modern_policy(config),
@@ -1434,6 +1672,8 @@ def _cmd_publish(args: argparse.Namespace) -> int:
         if not decision.allowed:
             raise CliError(decision.message)
     if resource.kind == "scheduled_query":
+        if force_published:
+            raise CliError("--force-publish no permite consultas programadas")
         if exception_used:
             raise CliError("Las consultas programadas no admiten excepciones estáticas")
         return _publish_scheduled_query(
@@ -1446,8 +1686,8 @@ def _cmd_publish(args: argparse.Namespace) -> int:
     if resource.kind not in {"notebook", "shared_query"}:
         raise CliError(f"Tipo no soportado para publicación: {resource.kind}")
     if mode == "update":
-        if config.mode != "team" or not config.allow_update_existing:
-            raise CliError("Actualizar un recurso existente requiere mode: team y allow_update_existing: true")
+        if config.mode not in {"team", "full-access"} or not config.allow_update_existing:
+            raise CliError("Actualizar un recurso existente requiere mode: team/full-access y allow_update_existing: true")
         if destination_project != resource.project:
             raise CliError("La actualización debe permanecer en el proyecto del recurso original")
         if args.repository_id:
@@ -1461,8 +1701,35 @@ def _cmd_publish(args: argparse.Namespace) -> int:
             raise CliError(str(error)) from error
     filename = str(manifest["filename"])
     current_sha = hashlib.sha256((task / filename).read_bytes()).hexdigest()
-    if current_sha != manifest.get("proposed_sha256"):
+    if not force_published and current_sha != manifest.get("proposed_sha256"):
         raise CliError("El archivo cambió después de validate; genere una nueva aprobación")
+    force_authorization: dict[str, Any] | None = None
+    if force_published:
+        force_authorization = {
+            "schema_version": 1,
+            "task_id": manifest["task_id"],
+            "resource": manifest.get("resource"),
+            "mode": mode,
+            "destination_project": destination_project,
+            "account": args.account,
+            "profile": config.profile_name,
+            "reason": redact_message(str(args.reason).strip())[:1000],
+            "requested_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            "validation_status": manifest.get("validation_status", "pending"),
+            "validation_present": bool(validation),
+            "content_sha256": current_sha,
+            "baseline_sha256": manifest.get("baseline_sha256"),
+        }
+        (task / "force-authorization.json").write_text(
+            json.dumps(force_authorization, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        manifest["proposed_sha256"] = current_sha
+        manifest["force_authorization"] = force_authorization
+        (task / "manifest.json").write_text(
+            json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
     if config.audit_root is None and not args.audit_root:
         raise CliError("Configura audit_root antes de publicar")
     audit_root = args.audit_root or config.audit_root
@@ -1472,11 +1739,19 @@ def _cmd_publish(args: argparse.Namespace) -> int:
     source_metadata = resource.metadata.get("source_metadata") or {}
     source_project = config.source_projects[0] if len(config.source_projects) == 1 else ""
     if source_project:
-        client = DataformClient(args.account, destination_project, source_project=source_project)
+        client = _configure_dataform_client(
+            DataformClient(args.account, destination_project, source_project=source_project),
+            config,
+            args.account,
+        )
     else:
         # Keep the constructor compatible with custom transports used by
         # integrations and tests that predate the optional source allowlist.
-        client = DataformClient(args.account, destination_project)
+        client = _configure_dataform_client(
+            DataformClient(args.account, destination_project),
+            config,
+            args.account,
+        )
     if resource.fingerprint != "local-input":
         try:
             remote = client.export(resource)
@@ -1489,7 +1764,7 @@ def _cmd_publish(args: argparse.Namespace) -> int:
     else:
         source = ExportedAsset(resource, filename, content, source_metadata, resource.fingerprint)
     try:
-        audit_store = _audit_store(audit_root)
+        audit_store = _audit_store(audit_root, gcloud_context=_gcloud_context(config, args.account))
         audit_receipt = audit_store.archive(task)
     except AuditError as error:
         raise CliError(str(error)) from error
@@ -1517,6 +1792,8 @@ def _cmd_publish(args: argparse.Namespace) -> int:
             )
     except DataformError as error:
         raise CliError(str(error)) from error
+    if force_published and (not hasattr(client, "read_file") or not isinstance(published, dict) or not published.get("repository")):
+        raise CliError("La publicación force requiere una lectura remota de comprobación")
     if hasattr(client, "read_file") and isinstance(published, dict) and published.get("repository"):
         try:
             saved = client.read_file(str(published["repository"]), filename)
@@ -1529,6 +1806,8 @@ def _cmd_publish(args: argparse.Namespace) -> int:
         "mode": mode,
         "exception_used": exception_used,
         "exception_digest": args.approved_exception_digest if exception_used else None,
+        "force_published": force_published,
+        "force_authorization": force_authorization,
         "audit": audit_receipt,
         "published": published,
         "destination_project": destination_project,
@@ -1550,13 +1829,22 @@ def _parser() -> argparse.ArgumentParser:
 
     init = sub.add_parser("init", help="crear o reconfigurar perfiles locales")
     init.add_argument("--path")
-    init.add_argument("--profile", choices=("pilot", "team"), default="pilot")
+    init.add_argument("--profile", choices=("pilot", "team", "full-access"), default="pilot")
     init.add_argument("--account")
+    init.add_argument("--gcloud-config-dir")
     init.add_argument("--source-projects")
     init.add_argument("--destination-projects")
+    init.add_argument("--project-alias", action="append", default=[])
+    init.add_argument("--source-project")
+    init.add_argument("--destination-project")
+    # Legacy Workbench flags remain accepted and are normalized to the
+    # explicit instance_* keys in the generated profile.
     init.add_argument("--workbench-project")
     init.add_argument("--workbench-location")
     init.add_argument("--workbench-instance")
+    init.add_argument("--workbench-instance-project")
+    init.add_argument("--workbench-instance-location")
+    init.add_argument("--workbench-instance-name")
     init.add_argument("--workbench-job-project")
     init.add_argument("--validation-backend", choices=("local", "workbench"), default="workbench")
     init.add_argument("--max-bytes", type=int)
@@ -1581,12 +1869,59 @@ def _parser() -> argparse.ArgumentParser:
     set_cmd.add_argument("--json", action="store_true")
     set_cmd.set_defaults(func=_cmd_config)
 
+    context_cmd = sub.add_parser("context", help="seleccionar el contexto de proyectos")
+    context_cmd.add_argument("--config")
+    context_cmd.add_argument("--json", action="store_true")
+    context_sub = context_cmd.add_subparsers(dest="context_command", required=True)
+    context_show = context_sub.add_parser("show")
+    context_show.add_argument("--config", default=argparse.SUPPRESS)
+    context_show.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
+    context_show.set_defaults(func=_cmd_context)
+    context_use = context_sub.add_parser("use")
+    context_use.add_argument("project")
+    context_use.add_argument("--config", default=argparse.SUPPRESS)
+    context_use.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
+    context_use.set_defaults(func=_cmd_context)
+    context_set = context_sub.add_parser("set")
+    context_set.add_argument("--source", required=True)
+    context_set.add_argument("--destination", required=True)
+    context_set.add_argument("--config", default=argparse.SUPPRESS)
+    context_set.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
+    context_set.set_defaults(func=_cmd_context)
+    context_alias = context_sub.add_parser("alias", help="gestionar alias de proyectos")
+    context_alias_sub = context_alias.add_subparsers(dest="alias_command", required=True)
+    context_alias_set = context_alias_sub.add_parser("set")
+    context_alias_set.add_argument("alias")
+    context_alias_set.add_argument("project")
+    context_alias_set.add_argument("--config", default=argparse.SUPPRESS)
+    context_alias_set.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
+    context_alias_set.set_defaults(func=_cmd_context)
+    context_alias_list = context_alias_sub.add_parser("list")
+    context_alias_list.add_argument("--config", default=argparse.SUPPRESS)
+    context_alias_list.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
+    context_alias_list.set_defaults(func=_cmd_context)
+
+    permissions_cmd = sub.add_parser("permissions", help="cambiar el perfil de permisos")
+    permissions_cmd.add_argument("--config")
+    permissions_cmd.add_argument("--json", action="store_true")
+    permissions_sub = permissions_cmd.add_subparsers(dest="permissions_command", required=True)
+    permissions_show = permissions_sub.add_parser("show")
+    permissions_show.add_argument("--config", default=argparse.SUPPRESS)
+    permissions_show.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
+    permissions_show.set_defaults(func=_cmd_permissions)
+    permissions_use = permissions_sub.add_parser("use")
+    permissions_use.add_argument("profile", choices=("pilot", "team", "full-access"))
+    permissions_use.add_argument("--config", default=argparse.SUPPRESS)
+    permissions_use.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
+    permissions_use.set_defaults(func=_cmd_permissions)
+
     policy_cmd = sub.add_parser("policy", help="explicar filtros de seguridad")
     policy_cmd.add_argument("--config")
     policy_cmd.add_argument("--json", action="store_true")
     policy_sub = policy_cmd.add_subparsers(dest="policy_command", required=True)
     show_policy = policy_sub.add_parser("show")
-    show_policy.add_argument("--json", action="store_true")
+    show_policy.add_argument("--config", default=argparse.SUPPRESS)
+    show_policy.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
     show_policy.set_defaults(func=_cmd_policy)
     check_policy = policy_sub.add_parser("check")
     check_policy.add_argument("--operation", choices=("validate", "publish", "execute", "delete"), required=True)
@@ -1595,7 +1930,8 @@ def _parser() -> argparse.ArgumentParser:
     check_policy.add_argument("--source-project")
     check_policy.add_argument("--destination-project")
     check_policy.add_argument("--location")
-    check_policy.add_argument("--json", action="store_true")
+    check_policy.add_argument("--config", default=argparse.SUPPRESS)
+    check_policy.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
     check_policy.set_defaults(func=_cmd_policy)
 
     install = sub.add_parser("install", help="instalar QueryFlow y su plugin de Codex")
@@ -1665,6 +2001,7 @@ def _parser() -> argparse.ArgumentParser:
     profile.add_argument("--table", required=True)
     profile.add_argument("--schema-file", required=True)
     profile.add_argument("--location")
+    profile.add_argument("--account")
     profile.add_argument("--max-bytes", type=int, default=1_073_741_824)
     profile.add_argument("--execute", action="store_true")
     profile.add_argument("--confirm-profile", action="store_true")
@@ -1732,12 +2069,14 @@ def _parser() -> argparse.ArgumentParser:
     publish.add_argument("--task", required=True)
     publish.add_argument("--approved-digest")
     publish.add_argument("--approved-exception-digest")
-    publish.add_argument("--destination-project", required=True)
+    publish.add_argument("--destination-project")
     publish.add_argument("--account", required=True)
     publish.add_argument("--repository-id")
     publish.add_argument("--display-name")
     publish.add_argument("--author-name", default="QueryFlow")
     publish.add_argument("--audit-root")
+    publish.add_argument("--force-publish", action="store_true", help="publicar con autorización explícita en full-access")
+    publish.add_argument("--reason", help="motivo auditable de una publicación force")
     publish.add_argument("--config")
     publish.add_argument("--json", action="store_true")
     publish.set_defaults(func=_cmd_publish)

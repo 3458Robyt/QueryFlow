@@ -11,6 +11,7 @@ queryflow doctor --config ~/.config/queryflow/config.toml --json
 queryflow doctor --config ~/.config/queryflow/config.toml --probe-remote --json
 gcloud auth list
 queryflow config validate --json
+queryflow context show --json
 queryflow policy show --config ~/.config/queryflow/config.toml --json
 ```
 
@@ -25,7 +26,8 @@ No compartas tokens ni resultados completos de consultas. Comparte el estado,
 | `blocked_permission` / `PERMISSION_DENIED` / `Access Denied` | La identidad no tiene un permiso de IAM, Dataform, BigQuery o Workbench. | Confirmar `gcloud auth list`, cuenta explícita y proyectos permitidos; solicitar el rol mínimo necesario. |
 | `authentication` | gcloud no pudo emitir un token para la cuenta elegida. | Renovar la autenticación aprobada y usar `--account`; nunca guardar el token en TOML. |
 | `transport`, timeout o `ServerNotFoundError` | Cloud Shell no alcanza el servicio o el proxy Workbench. | Revisar `doctor`, instancia/ubicación/proyecto del job y reintentar; no cambiar al perímetro equivocado. |
-| Faltan campos Workbench | El perfil moderno no puede construir el runner dentro del perímetro. | Configurar proyecto, ubicación, instancia y proyecto de jobs mediante `queryflow init`. |
+| Faltan campos Workbench | El perfil moderno no puede construir el runner dentro del perímetro. | Configurar `--workbench-instance-project`, `--workbench-instance-location`, `--workbench-instance-name` y `--workbench-job-project` mediante `queryflow init`. |
+| La cuenta cambia o desaparece | Se heredó un `CLOUDSDK_CONFIG` temporal de una sesión anterior. | Comprueba `queryflow doctor --json`; QueryFlow usa `~/.config/gcloud` de forma persistente. Reautentica allí si hace falta. |
 | Dataform `NOT_FOUND` | El nombre es antiguo, ambiguo o pertenece a otro proyecto/ubicación. | Refrescar catálogo y volver a empezar usando el `name` canónico exacto. |
 
 ## SQL y estado de la tarea
@@ -38,7 +40,8 @@ No compartas tokens ni resultados completos de consultas. Comparte el estado,
 | `changes_required`, `failed` o error SQL | El contenido actual no pasó análisis o dry-run. | Corregir la tarea, validar de nuevo y descartar digests anteriores. |
 | Digest/archivo stale | El archivo cambió después de validar o aprobar. | Crear una nueva validación y solicitar un nuevo digest. |
 | Remote head changed | Alguien modificó el recurso original mientras la tarea estaba abierta. | Refrescar el catálogo, crear una tarea nueva y reaplicar el cambio. |
-| Destino no permitido | El perfil no incluye proyecto o ubicación solicitados. | Usar un destino aprobado o pedir cambio de política; no forzar otro flag. |
+| Destino no permitido | El perfil no incluye proyecto o ubicación solicitados. | Revisar `queryflow context show` y usar un destino aprobado; `--force-publish` no permite saltarse esta regla. |
+| `--force-publish` rechazado | El perfil no es `full-access`, falta `allow_force_publish` o no se indicó motivo. | Cambiar el perfil con aprobación administrativa o usar el flujo normal con digest. |
 
 ## Muestra y Web Preview
 
@@ -54,7 +57,7 @@ No compartas tokens ni resultados completos de consultas. Comparte el estado,
 ## Instalación y plugin
 
 ```bash
-queryflow install --ref v0.2.0-beta.1 --dry-run --json
+queryflow install --ref v0.3.0-beta.1 --dry-run --json
 ```
 
 Si la CLI funciona pero Codex no reconoce QueryFlow, confirma que el

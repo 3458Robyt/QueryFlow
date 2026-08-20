@@ -3,6 +3,7 @@ import tarfile
 import unittest
 from zipfile import ZIP_STORED, ZipFile, ZipInfo
 
+from queryflow import __version__
 from queryflow.release_build import normalize_sdist_bytes, normalize_wheel_bytes
 
 
@@ -11,7 +12,7 @@ def _wheel_bytes(
 ) -> bytes:
     output = io.BytesIO()
     with ZipFile(output, "w", compression=ZIP_STORED) as archive:
-        names = ["pkg/__init__.py", "pkg-0.2.0.dist-info/WHEEL"]
+        names = ["pkg/__init__.py", f"pkg-{__version__}.dist-info/WHEEL"]
         if reverse:
             names.reverse()
         for name in names:
@@ -25,8 +26,8 @@ def _sdist_bytes(timestamp: int, reverse: bool) -> bytes:
     output = io.BytesIO()
     with tarfile.open(fileobj=output, mode="w:gz") as archive:
         names = [
-            "queryflow-0.2.0b1/README.md",
-            "queryflow-0.2.0b1/queryflow/__init__.py",
+            f"queryflow-{__version__}/README.md",
+            f"queryflow-{__version__}/queryflow/__init__.py",
         ]
         if reverse:
             names.reverse()

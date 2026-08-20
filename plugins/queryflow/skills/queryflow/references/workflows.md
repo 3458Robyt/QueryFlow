@@ -19,7 +19,8 @@ Use this path for a notebook or Shared Query already in Google Cloud:
 
 1. Refresh/search the catalog if the local catalog is missing or stale.
 2. Capture the canonical `name`, kind, project, location, and fingerprint.
-3. Run `start --resource` with the analyst account and intended destination.
+3. Run `start --resource` with the analyst account; use the saved context or
+   pass the intended destination explicitly.
 4. Edit only the task workspace.
 5. Run Workbench validation and open the Web Preview.
 
@@ -88,6 +89,17 @@ destination project. Before publishing, verify:
 Team update mode is a separate policy decision. It requires the team profile,
 an existing canonical resource, a remote head check, and a fresh digest. Never
 convert a pilot copy task into an update task.
+
+In a reviewed `full-access` profile, the analyst may explicitly order a
+notebook or Shared Query publication without validation/dry-run evidence:
+
+```text
+permissions use full-access → publish --force-publish --reason REASON
+```
+
+This route still requires the canonical resource, destination, remote head,
+audit package, content hash, and read-back, and records
+`force-authorization.json`. It never runs SQL, enables schedules, or deletes.
 
 Scheduled queries, route rewriting, dictionary-based migration, deletion, and
 automatic execution are outside this workflow. Explain that boundary instead

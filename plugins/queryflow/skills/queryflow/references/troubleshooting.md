@@ -20,6 +20,7 @@ Run these read-only checks first:
 queryflow doctor --config ~/.config/queryflow/config.toml --json
 gcloud auth list
 queryflow config validate --json
+queryflow context show --json
 queryflow policy show --config ~/.config/queryflow/config.toml --json
 queryflow status --task TASK --json
 queryflow diagnose --task TASK --format markdown --output diagnostic.md
@@ -37,7 +38,8 @@ after access is corrected.
 | `blocked_permission`, `PERMISSION_DENIED`, or `Access Denied` | The active identity lacks an IAM/Dataform/BigQuery/Workbench permission. | Confirm `gcloud auth list`, the configured account, source/destination access, and Workbench service permissions. Ask the owner to grant the minimum role. |
 | `authentication` or token failure | The requested account cannot produce a usable gcloud token. | Reauthenticate with the approved account and pass `--account` explicitly. Do not paste a token into a config, task, issue, or chat. |
 | timeout, `ServerNotFoundError`, or transport error | Cloud Shell cannot reach the service or Workbench proxy. | Run `doctor`, confirm instance/location/job project, and retry later. Do not switch to an unapproved execution path to avoid the error. |
-| Workbench fields missing | The modern profile cannot construct its in-perimeter runner. | Set `workbench_project`, `workbench_location`, `workbench_instance`, and `workbench_job_project` with `queryflow init` or a reviewed TOML profile. |
+| Workbench fields missing | The modern profile cannot construct its in-perimeter runner. | Set `workbench_instance_project`, `workbench_instance_location`, `workbench_instance_name`, and `workbench_job_project` with `queryflow init` or a reviewed TOML profile. |
+| account changes unexpectedly | A temporary inherited `CLOUDSDK_CONFIG` points at another session. | Inspect `queryflow doctor --json`; QueryFlow pins `~/.config/gcloud` unless the profile explicitly overrides it. |
 | Dataform `NOT_FOUND` for a query/notebook | The resource identifier is stale, display-name based, or from the wrong project/location. | Refresh the catalog and start again from the exact canonical `name`; do not invent a repository ID. |
 
 ## SQL and task state
@@ -51,6 +53,7 @@ after access is corrected.
 | stale content/digest | The task changed after validation or sample approval. | Do not reuse the digest. Validate again and request a new approval. |
 | remote head changed | Someone changed the source after the task began. | Stop, refresh the catalog, create a new task, and reapply the reviewed change. |
 | destination not allowed | The active profile allowlist does not include the requested project/location. | Use an approved destination or ask the policy owner to change the profile; do not pass a different project just to proceed. |
+| `--force-publish` rejected | The active profile is not `full-access`, force is disabled, or the reason is empty. | Use the normal digest flow or obtain an approved full-access profile; force is not a way around destination/conflict/read-back checks. |
 
 ## Sample and review
 
@@ -69,7 +72,7 @@ after access is corrected.
 Preview installer commands before running them:
 
 ```bash
-queryflow install --ref v0.2.0-beta.1 --dry-run --json
+queryflow install --ref v0.3.0-beta.1 --dry-run --json
 ```
 
 If the CLI works but Codex does not mention QueryFlow, confirm that the

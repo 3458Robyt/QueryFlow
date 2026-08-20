@@ -8,6 +8,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterable, Optional, Union
 
+from .gcloud import GcloudContext
+
 
 class CatalogError(RuntimeError):
     """A catalog operation could not be completed safely."""
@@ -107,8 +109,16 @@ def _stable_fingerprint(raw: Any) -> str:
 Runner = Callable[[list[str]], Any]
 
 
-def run_json_command(command: list[str]) -> Any:
-    completed = subprocess.run(command, check=False, capture_output=True, text=True)
+def _run_json(command: list[str], *, runner: Runner, gcloud_context: Optional[GcloudContext]) -> Any:
+    return run_json_command(command, gcloud_context=gcloud_context) if gcloud_context else runner(command)
+
+
+def run_json_command(command: list[str], *, gcloud_context: Optional[GcloudContext] = None) -> Any:
+    completed = (
+        gcloud_context.run(command)
+        if gcloud_context
+        else subprocess.run(command, check=False, capture_output=True, text=True)
+    )
     if completed.returncode != 0:
         detail = completed.stderr.strip() or completed.stdout.strip()
         raise CatalogError(f"Falló {' '.join(command)}: {detail}")
@@ -134,12 +144,17 @@ def _split_project_location(name: str) -> tuple[str, str]:
     return project, location
 
 
-def discover_projects(*, account: Optional[str] = None, runner: Runner = run_json_command) -> list[str]:
+def discover_projects(
+    *,
+    account: Optional[str] = None,
+    runner: Runner = run_json_command,
+    gcloud_context: Optional[GcloudContext] = None,
+) -> list[str]:
     command = ["gcloud"]
     if account:
         command.append(f"--account={account}")
     command += ["projects", "list", "--format=json", "--quiet"]
-    raw = runner(command)
+    raw = _run_json(command, runner=runner, gcloud_context=gcloud_context)
     if not isinstance(raw, list):
         raise CatalogError("gcloud projects list no devolvió una lista")
     projects = []
@@ -154,6 +169,7 @@ def discover_dataform_assets(
     *,
     account: Optional[str] = None,
     runner: Runner = run_json_command,
+    gcloud_context: Optional[GcloudContext] = None,
 ) -> tuple[list[ResourceRef], list[str]]:
     command = ["gcloud"]
     if account:
@@ -167,7 +183,7 @@ def discover_dataform_assets(
         "--quiet",
     ]
     try:
-        raw = runner(command)
+        raw = _run_json(command, runner=runner, gcloud_context=gcloud_context)
     except Exception as error:
         return [], [f"{project}: no se pudo consultar Dataform: {error}"]
     if not isinstance(raw, list):
@@ -205,6 +221,7 @@ def discover_bigquery_assets(
     *,
     account: Optional[str] = None,
     runner: Runner = run_json_command,
+    gcloud_context: Optional[GcloudContext] = None,
 ) -> tuple[list[ResourceRef], list[str]]:
     asset_types = (
         ("bigquery.googleapis.com/Table", "table"),
@@ -226,7 +243,7 @@ def discover_bigquery_assets(
             "--quiet",
         ]
         try:
-            raw = runner(command)
+            raw = _run_json(command, runner=runner, gcloud_context=gcloud_context)
         except Exception as error:
             warnings.append(f"{project}: no se pudo consultar {asset_type}: {error}")
             continue
@@ -282,18 +299,19 @@ def refresh_catalog(
     projects: Optional[Iterable[str]] = None,
     account: Optional[str] = None,
     runner: Runner = run_json_command,
+    gcloud_context: Optional[GcloudContext] = None,
 ) -> Catalog:
-    project_ids = sorted(set(projects or discover_projects(account=account, runner=runner)))
+    project_ids = sorted(set(projects or discover_projects(account=account, runner=runner, gcloud_context=gcloud_context)))
     resources: list[ResourceRef] = []
     warnings: list[str] = []
     for project in project_ids:
         discovered, project_warnings = discover_dataform_assets(
-            project, account=account, runner=runner
+            project, account=account, runner=runner, gcloud_context=gcloud_context
         )
         resources.extend(discovered)
         warnings.extend(project_warnings)
         discovered, project_warnings = discover_bigquery_assets(
-            project, account=account, runner=runner
+            project, account=account, runner=runner, gcloud_context=gcloud_context
         )
         resources.extend(discovered)
         warnings.extend(project_warnings)

@@ -12,8 +12,10 @@ can be retained, or which environment should execute a query.
    is not a row-execution boundary for the pilot.
 4. **Workbench:** in-perimeter location for real BigQuery dry-runs and bounded
    samples.
-5. **GCP publication:** the only write boundary, reached only by `publish`
-   after exact digest approval, allowlist checks, audit, and remote read-back.
+5. **GCP publication:** the only write boundary, reached by `publish` after
+   exact digest approval in normal profiles, or after explicit full-access
+   force authorization, always with allowlist checks, audit, and remote
+   read-back.
 
 Do not collapse these boundaries to make a failing step pass.
 
@@ -23,7 +25,8 @@ Do not collapse these boundaries to make a failing step pass.
   multi-statement, DML, DDL, transaction, export, load, and procedure content
   is blocked.
 - The pilot creates new copies only. Deletion is never available. Existing
-  updates require the separately approved `team` profile and concurrency check.
+  updates require the separately approved `team` or `full-access` profile and
+  a concurrency check.
 - Scheduled queries are disabled in the v1 policy. No schedule is enabled or
   executed automatically.
 - A validation digest is tied to task content and validation evidence. A sample
@@ -48,6 +51,13 @@ The `team` profile is not a bypass. It is a separately reviewed configuration
 that may permit an existing-resource update only when `allow_update_existing`
 is true and the task has a remote commit base. Keep profiles credential-free;
 gcloud supplies identity and tokens.
+
+The `full-access` profile is also bounded: `--force-publish --reason` may be
+used for an explicitly ordered notebook or Shared Query publication when
+validation/dry-run evidence is unavailable. It does not execute SQL, enable
+schedules, delete resources, or skip canonical-resource, destination, remote
+head, audit, hash, or read-back checks. The command records
+`force-authorization.json`.
 
 `allow_static_exception` is a separate, default-off team setting. An exception
 requires a successful static validation, reason, reference, independent
