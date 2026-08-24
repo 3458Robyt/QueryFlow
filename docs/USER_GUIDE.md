@@ -205,7 +205,45 @@ QueryFlow mantiene la búsqueda canónica, el proyecto destino de la tarea, el
 control de `head`, la auditoría, el hash del contenido y el read-back. Deja
 `force-authorization.json` para revisión posterior.
 
-## 7. Qué debe recibir el analista
+## 7. Evaluar FinOps para negocio y plataforma
+
+El flujo FinOps es una evaluación bajo demanda y no cambia el ciclo de edición
+de consultas. Configura una allowlist explícita en el perfil:
+
+```bash
+queryflow init --profile pilot \
+  --finops-projects finance-project,analytics-project \
+  --finops-window-days 30 \
+  --business-context-path business-context.toml
+```
+
+Ejecuta la evaluación desde Cloud Shell o un entorno autorizado:
+
+```bash
+queryflow finops assess --config ~/.config/queryflow/config.toml \
+  --projects analytics-project --json
+```
+
+El resultado combina inventario de Cloud Asset Inventory, recomendaciones de
+GCP y, cuando Workbench/Billing Export están disponibles, métricas agregadas
+de jobs, almacenamiento y costo. La salida separa una lectura ejecutiva de un
+apéndice técnico. Las fuentes tienen estado y limitaciones explícitos; una
+fuente no disponible no se convierte en cero.
+
+Abre el informe verificado sin endpoints de escritura:
+
+```bash
+queryflow finops show --assessment ASSESSMENT_ID --json
+queryflow finops review --assessment ASSESSMENT_ID --serve
+```
+
+Los hallazgos identifican proyecto/recurso, evidencia, confianza, supuestos y
+un plan `plan_only`. Antes de proponer cualquier cambio, confirma propietario,
+criticidad, tratamiento contable y aprobación del equipo responsable. No
+compartas filas crudas, respuestas completas de proveedores ni el mapa
+empresarial.
+
+## 8. Qué debe recibir el analista
 
 El agente debe entregar siempre:
 

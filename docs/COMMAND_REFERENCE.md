@@ -24,6 +24,9 @@ salida vaya a ser procesada por Codex u otra herramienta.
 | `queryflow catalog search` | Buscar recursos en el catálogo local. | no | no |
 | `queryflow catalog show` | Mostrar un recurso canónico. | no | no |
 | `queryflow profile` | Obtener estadísticas agregadas de una tabla. | opcional | no |
+| `queryflow finops assess` | Crear un snapshot FinOps/salud cloud. | sí | no |
+| `queryflow finops show` | Verificar y mostrar un assessment. | no | no |
+| `queryflow finops review` | Servir el informe FinOps de solo lectura. | no | no |
 | `queryflow start` | Crear una tarea aislada. | opcional | no |
 | `queryflow validate` | Clasificar y validar SQL/notebooks. | opcional | no |
 | `queryflow review` | Crear o servir el diff Web Preview. | no | no |
@@ -99,6 +102,29 @@ queryflow publish --task TASK --force-publish \
 
 La publicación force todavía exige destino permitido, control de conflicto,
 auditoría, `force-authorization.json` y lectura remota de comprobación.
+
+### `queryflow finops`
+
+La evaluación requiere una allowlist FinOps en el perfil (`finops_projects`) o
+reutiliza los proyectos origen/destino. `--projects` nunca puede ampliarla.
+El perfil puede declarar opcionalmente `billing_export_table`,
+`business_context_path` y `finops_window_days`.
+
+```bash
+queryflow finops assess --config ~/.config/queryflow/config.toml \
+  --projects FINOPS_PROJECT --window-days 30 \
+  --billing-table BILLING_PROJECT.DATASET.TABLE \
+  --business-context business-context.toml --json
+queryflow finops show --assessment ASSESSMENT_ID --json
+queryflow finops review --assessment ASSESSMENT_ID --serve --port 8080
+```
+
+`assess` consulta solo Cloud Asset Inventory, los recommenders revisados y
+agregados fijos de BigQuery/Billing Export dentro de Workbench. Devuelve la
+ubicación de los artefactos y un informe con estado `complete`, `partial` o
+`failed`. `show` y `review` vuelven a calcular hashes y rechazan un snapshot
+alterado. El servidor Web Preview solo acepta `GET`; todos los planes son
+`plan_only`.
 
 ### `queryflow policy`
 

@@ -1,9 +1,12 @@
 # QueryFlow
 
-QueryFlow es una CLI de Python y un plugin de Codex para crear o modificar
-consultas SQL y notebooks en Google Cloud con revisión humana. Cada cambio se
-trabaja en una tarea aislada, se valida, se muestra en un diff tipo Pull
-Request y solo se publica después de aprobar el digest exacto.
+QueryFlow es una CLI de Python y un plugin de Codex para trabajar con SQL,
+notebooks y decisiones FinOps en Google Cloud con revisión humana. El flujo
+original de edición sigue intacto: cada cambio vive en una tarea aislada, se
+valida, se muestra en un diff tipo Pull Request y solo se publica después de
+aprobar el digest exacto. El nuevo flujo de evaluación genera snapshots de
+salud cloud y oportunidades para negocio, finanzas y plataforma sin escribir
+recursos remotos.
 
 ## Inicio rápido
 
@@ -69,6 +72,18 @@ queryflow config set preferences.review_mode unified --json
 
 La configuración se guarda en `~/.config/queryflow/config.toml`. Contiene
 preferencias y límites, nunca secretos.
+
+Para habilitar el alcance FinOps, usa `--finops-projects` o conserva los
+`source_projects`/`destination_projects` existentes. Un Billing Export y un
+mapa empresarial son opcionales:
+
+```bash
+queryflow init --profile pilot \
+  --finops-projects FINOPS_PROJECT \
+  --billing-export-table BILLING_PROJECT.DATASET.TABLE \
+  --business-context-path business-context.toml \
+  --finops-window-days 30
+```
 
 ### Contexto y permisos
 
@@ -190,6 +205,37 @@ En el perfil `pilot`, la publicación crea una copia nueva. No actualiza ni
 elimina el recurso original, no habilita programaciones y no ejecuta SQL
 mutante automáticamente.
 
+### 5. Evaluar FinOps y salud cloud
+
+La evaluación es independiente de la edición de SQL, pero reutiliza el mismo
+contexto autenticado y las allowlists. Ejecuta fuentes por capas sobre los
+proyectos permitidos:
+
+```bash
+queryflow finops assess \
+  --config ~/.config/queryflow/config.toml \
+  --projects FINOPS_PROJECT --window-days 30 --json
+```
+
+Cloud Asset Inventory y Recommender aportan señales de inventario,
+desperdicio, confiabilidad y rendimiento. Las métricas agregadas de BigQuery y
+Billing Export (si están configuradas) se ejecutan dentro del Workbench
+aprobado con dry-run, límite de bytes y salida acotada. La ausencia de una
+fuente se declara como `partial`, `unavailable` o `unconfigured`; nunca se
+interpreta como costo cero ni como ahorro inventado.
+
+El comando genera `manifest.json`, evidencia y un informe doble (ejecutivo y
+técnico) bajo `~/.queryflow/assessments/`. Verifica el digest antes de
+compartirlo:
+
+```bash
+queryflow finops show --assessment ASSESSMENT_ID --json
+queryflow finops review --assessment ASSESSMENT_ID --serve --port 8080
+```
+
+Todos los hallazgos son `plan_only`: contienen evidencia, confianza,
+limitaciones y pasos propuestos, pero no cambian recursos GCP.
+
 ## Límites de seguridad
 
 - Las credenciales permanecen en `gcloud`; nunca se guardan tokens en TOML,
@@ -214,6 +260,7 @@ mutante automáticamente.
 - [Skill de Codex](plugins/queryflow/skills/queryflow/SKILL.md): instrucciones
   que usa el agente para operar QueryFlow.
 - [Arquitectura y frontera con Gemini](docs/ARCHITECTURE.md).
+- [Evaluación FinOps y salud cloud](plugins/queryflow/skills/queryflow-finops/SKILL.md).
 - [Guía del administrador GCP](docs/ADMIN_GUIDE.md).
 - [Informe de aceptación beta](docs/BETA_ACCEPTANCE.md).
 - [Seguridad](SECURITY.md) y [contribución](CONTRIBUTING.md).
