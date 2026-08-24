@@ -116,9 +116,9 @@ gcloud_config_dir = "~/.config/gcloud"
     assert "token" not in path.read_text(encoding="utf-8").lower()
 
 
-def test_new_config_writes_schema_three(tmp_path):
+def test_new_config_writes_schema_four(tmp_path):
     path = tmp_path / "new.toml"
     document = ConfigStore(path).initialize(profile="pilot", values={"mode": "pilot"})
 
-    assert document.schema_version == 3
-    assert ConfigStore(path).load().schema_version == 3
+    assert document.schema_version == 4
+    assert ConfigStore(path).load().schema_version == 4

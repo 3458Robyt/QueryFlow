@@ -10,7 +10,7 @@ import time
 import uuid
 from dataclasses import dataclass
 from http.cookiejar import CookieJar
-from typing import Any, Optional, Sequence
+from typing import Any, Mapping, Optional, Sequence
 from urllib.parse import urlparse
 from urllib.request import HTTPCookieProcessor, Request, build_opener
 
@@ -641,6 +641,226 @@ def execute_workbench_sample(
         return {"ok": False, "rows": [], "truncated": False, "errors": [str(error)], "error_kind": error.kind}
     except (OSError, json.JSONDecodeError, ValueError) as error:
         return {"ok": False, "rows": [], "truncated": False, "errors": [str(error)], "error_kind": "transport"}
+    finally:
+        if kernel_id and http:
+            try:
+                http.delete_kernel(kernel_id)
+            except WorkbenchError:
+                pass
+
+
+def build_aggregate_payload(
+    queries: Mapping[str, Sequence[Mapping[str, str]]],
+    *,
+    maximum_bytes_billed: int,
+    limit: int = 100,
+) -> dict[str, Any]:
+    """Build a bounded, hash-checked payload for fixed aggregate queries."""
+    if limit < 1 or limit > 100:
+        raise ValueError("El límite de agregados debe estar entre 1 y 100")
+    items: list[dict[str, Any]] = []
+    for kind in sorted(queries):
+        for item in queries[kind]:
+            sql = str(item.get("sql") or "")
+            if not sql:
+                raise ValueError("Una consulta agregada no puede estar vacía")
+            items.append(
+                {
+                    "kind": kind,
+                    "project": str(item.get("project") or ""),
+                    "sql": sql,
+                    "sha256": hashlib.sha256(sql.encode("utf-8")).hexdigest(),
+                }
+            )
+    return {"maximum_bytes_billed": maximum_bytes_billed, "limit": limit, "queries": items}
+
+
+def _remote_aggregate_code(payload: dict[str, Any]) -> str:
+    encoded_payload = repr(json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
+    return f"""
+import json
+import subprocess
+
+payload = json.loads({encoded_payload})
+allowed_keys = {{
+    "project_id", "period", "job_count", "total_bytes_billed", "total_slot_ms",
+    "table_count", "total_physical_bytes", "cost", "line_count",
+}}
+records = []
+for item in payload["queries"]:
+    dry_run_command = [
+        "bq", "query", "--use_legacy_sql=false", "--dry_run", "--format=json",
+        f"--maximum_bytes_billed={{payload['maximum_bytes_billed']}}",
+        f"--location={{payload['location']}}",
+        f"--project_id={{payload['job_project']}}",
+        item["sql"],
+    ]
+    dry_run = subprocess.run(dry_run_command, capture_output=True, text=True, check=False)
+    if dry_run.returncode != 0:
+        records.append({{
+            "kind": item["kind"], "project": item["project"], "sha256": item["sha256"],
+            "ok": False, "rows": [], "error": dry_run.stderr.strip() or "dry-run falló",
+        }})
+        continue
+    try:
+        dry_run_response = json.loads(dry_run.stdout or "{{}}")
+        dry_run_stats = dry_run_response.get("statistics", {{}}).get("query", {{}})
+        estimated_bytes = int(dry_run_stats.get("totalBytesProcessed", 0))
+    except (TypeError, ValueError, json.JSONDecodeError) as error:
+        records.append({{
+            "kind": item["kind"], "project": item["project"], "sha256": item["sha256"],
+            "ok": False, "rows": [], "error": f"dry-run devolvió JSON inválido: {{error}}",
+        }})
+        continue
+    if estimated_bytes > payload["maximum_bytes_billed"]:
+        records.append({{
+            "kind": item["kind"], "project": item["project"], "sha256": item["sha256"],
+            "ok": False, "rows": [], "error": f"dry-run excede el límite: {{estimated_bytes}}",
+        }})
+        continue
+    command = [
+        "bq", "query", "--use_legacy_sql=false", "--format=json",
+        f"--max_rows={{payload['limit']}}",
+        f"--maximum_bytes_billed={{payload['maximum_bytes_billed']}}",
+        f"--location={{payload['location']}}",
+        f"--project_id={{payload['job_project']}}",
+        item["sql"],
+    ]
+    completed = subprocess.run(command, capture_output=True, text=True, check=False)
+    record = {{
+        "kind": item["kind"],
+        "project": item["project"],
+        "sha256": item["sha256"],
+        "ok": completed.returncode == 0,
+        "rows": [],
+        "estimated_bytes": estimated_bytes,
+        "error": completed.stderr.strip() or None,
+    }}
+    if completed.returncode == 0:
+        try:
+            response = json.loads(completed.stdout or "[]")
+            rows = response if isinstance(response, list) else [response]
+            record["rows"] = [
+                {{key: value for key, value in row.items() if key in allowed_keys and (isinstance(value, (str, int, float, bool)) or value is None)}}
+                for row in rows[:payload["limit"]]
+                if isinstance(row, dict)
+            ]
+        except (TypeError, ValueError, json.JSONDecodeError) as error:
+            record["ok"] = False
+            record["error"] = f"bq devolvió JSON inválido: {{error}}"
+    records.append(record)
+
+summary = {{"ok": all(item["ok"] for item in records), "records": records}}
+print("QUERYFLOW_AGGREGATE=" + json.dumps(summary, ensure_ascii=False, sort_keys=True))
+"""
+
+
+def parse_aggregate_summary(
+    summary: Mapping[str, Any],
+    queries: Mapping[str, Sequence[Mapping[str, str]]],
+    *,
+    limit: int = 100,
+) -> dict[str, Any]:
+    """Verify aggregate hashes and return bounded metrics only."""
+    expected: dict[tuple[str, str], str] = {}
+    allowed_keys = {
+        "project_id", "period", "job_count", "total_bytes_billed", "total_slot_ms",
+        "table_count", "total_physical_bytes", "cost", "line_count",
+    }
+    for kind, items in queries.items():
+        for item in items:
+            project = str(item.get("project") or "")
+            sql = str(item.get("sql") or "")
+            expected[(kind, project)] = hashlib.sha256(sql.encode("utf-8")).hexdigest()
+    aggregates: dict[str, list[dict[str, Any]]] = {kind: [] for kind in queries}
+    statuses: dict[str, str] = {kind: "ok" for kind in queries}
+    warnings: list[str] = []
+    records = summary.get("records") or []
+    if not isinstance(records, list):
+        return {"aggregates": aggregates, "statuses": {kind: "unavailable" for kind in queries}, "warnings": ["Resumen Workbench inválido"]}
+    for record in records:
+        if not isinstance(record, dict):
+            warnings.append("Workbench devolvió un registro de agregado inválido")
+            continue
+        kind = str(record.get("kind") or "")
+        project = str(record.get("project") or "")
+        if (kind, project) not in expected or record.get("sha256") != expected[(kind, project)]:
+            statuses[kind] = "integrity" if kind in statuses else "unavailable"
+            warnings.append(f"{kind}/{project}: el hash de la consulta agregada no coincide")
+            continue
+        if not record.get("ok"):
+            statuses[kind] = "unavailable"
+            warnings.append(f"{kind}/{project}: {record.get('error') or 'consulta falló'}")
+            continue
+        rows = record.get("rows") or []
+        if isinstance(rows, list):
+            aggregates.setdefault(kind, []).extend(
+                {
+                    key: value
+                    for key, value in row.items()
+                    if key in allowed_keys and (isinstance(value, (str, int, float, bool)) or value is None)
+                }
+                for row in rows[:limit]
+                if isinstance(row, dict)
+            )
+    for kind in queries:
+        aggregates[kind] = aggregates.get(kind, [])[:limit]
+    return {"aggregates": aggregates, "statuses": statuses, "warnings": warnings}
+
+
+def execute_workbench_aggregate(
+    queries: Mapping[str, Sequence[Mapping[str, str]]],
+    *,
+    settings: WorkbenchSettings | Mapping[str, Any],
+    maximum_bytes_billed: int,
+    account: Optional[str] = None,
+    gcloud_context: Optional[GcloudContext] = None,
+    limit: int = 100,
+) -> dict[str, Any]:
+    """Run fixed aggregate SQL in an ephemeral Workbench kernel.
+
+    The returned rows are already restricted to known aggregate fields and are
+    never written to the kernel or local artifacts in raw form.
+    """
+    if not isinstance(settings, WorkbenchSettings):
+        settings = WorkbenchSettings(
+            project=str(settings.get("project") or ""),
+            location=str(settings.get("location") or ""),
+            instance=str(settings.get("instance") or ""),
+            job_project=str(settings.get("job_project") or ""),
+            timeout_seconds=int(settings.get("timeout_seconds") or 240),
+        )
+    payload = build_aggregate_payload(queries, maximum_bytes_billed=maximum_bytes_billed, limit=limit)
+    payload.update({"job_project": settings.job_project, "location": _bigquery_location(settings.location)})
+    http: Optional[_JupyterHttp] = None
+    kernel_id: Optional[str] = None
+    try:
+        token = _access_token(account, gcloud_context=gcloud_context)
+        proxy = discover_proxy(settings, account=account, gcloud_context=gcloud_context)
+        http = _JupyterHttp(proxy, token, timeout=settings.timeout_seconds)
+        http.prepare()
+        kernel_id = http.create_kernel()
+        output = _websocket_execute(http, kernel_id, _remote_aggregate_code(payload), timeout=settings.timeout_seconds)
+        marker = "QUERYFLOW_AGGREGATE="
+        result_line = next((line for line in output.splitlines() if line.startswith(marker)), None)
+        if result_line is None:
+            raise WorkbenchError("Workbench no devolvió QUERYFLOW_AGGREGATE", kind="transport")
+        summary = json.loads(result_line[len(marker):])
+        if not isinstance(summary, dict):
+            raise WorkbenchError("Workbench devolvió un agregado inválido", kind="transport")
+        return parse_aggregate_summary(summary, queries, limit=limit)
+    except WorkbenchError as error:
+        return {
+            "aggregates": {kind: [] for kind in queries},
+            "statuses": {kind: "unavailable" for kind in queries},
+            "warnings": [str(error)],
+        }
+    except (OSError, json.JSONDecodeError, ValueError) as error:
+        return {
+            "aggregates": {kind: [] for kind in queries},
+            "statuses": {kind: "unavailable" for kind in queries},
+            "warnings": [str(error)],
+        }
     finally:
         if kernel_id and http:
             try:
