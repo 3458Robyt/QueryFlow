@@ -240,7 +240,10 @@ def validate_sql_fragments(fragments: Sequence[tuple[int, str]]) -> ValidationRe
 
 
 Runner = Callable[[list[str]], tuple[int, str, str]]
-TokenProvider = Callable[[str], str]
+# Providers may optionally accept the pinned gcloud context.  Keep the
+# callable intentionally open so tests and local adapters that accept only the
+# account remain valid.
+TokenProvider = Callable[..., str]
 
 
 def subprocess_runner(command: list[str]) -> tuple[int, str, str]:

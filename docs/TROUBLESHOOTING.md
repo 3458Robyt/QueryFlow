@@ -30,6 +30,18 @@ No compartas tokens ni resultados completos de consultas. Comparte el estado,
 | La cuenta cambia o desaparece | Se heredó un `CLOUDSDK_CONFIG` temporal de una sesión anterior. | Comprueba `queryflow doctor --json`; QueryFlow usa `~/.config/gcloud` de forma persistente. Reautentica allí si hace falta. |
 | Dataform `NOT_FOUND` | El nombre es antiguo, ambiguo o pertenece a otro proyecto/ubicación. | Refrescar catálogo y volver a empezar usando el `name` canónico exacto. |
 
+## Evaluaciones FinOps
+
+| Mensaje/estado | Qué significa | Qué hacer |
+| --- | --- | --- |
+| `No hay proyectos FinOps permitidos` | El perfil no tiene `finops_projects` ni proyectos origen/destino utilizables. | Configurar una allowlist explícita con `queryflow init` o `config set`; no enumerar la organización automáticamente. |
+| `--projects ... fuera de alcance` | El argumento intenta ampliar la allowlist. | Elegir solo proyectos ya permitidos y confirmar `queryflow config list --json`. |
+| Fuente `unconfigured` | La fuente es opcional o falta una configuración (por ejemplo, Billing Export o Workbench). | Continuar con las fuentes disponibles y reportar la limitación; no asumir costo cero. |
+| Fuente `unavailable` / `partial` | IAM, VPC, región, API o transporte impidió una o más consultas. | Revisar la advertencia y el `error_kind`, pedir el rol mínimo o corregir Workbench; repetir el assessment. |
+| Digest de assessment no coincide | Se modificó un artefacto local después de generarlo. | No compartirlo; conserva el directorio para investigación y genera un assessment nuevo. |
+| Cobertura de contexto baja | Faltan labels/tags o entradas del mapa para owner, unidad, centro de costo o criticidad. | Completar el contrato de contexto y repetir la evaluación; la ausencia no implica recurso huérfano. |
+| Billing Export sin tendencia | La tabla no tiene datos suficientes para ambos periodos o el esquema no coincide. | Verificar tabla, región, permisos y ventana; presentar la fuente como parcial, no como cero. |
+
 ## SQL y estado de la tarea
 
 | Mensaje/estado | Qué significa | Qué hacer |

@@ -51,6 +51,34 @@ Workbench con operaciones de solo lectura. Para el flujo principal se esperan
 `notebooks.googleapis.com` o `aiplatform.googleapis.com`, según el tipo de
 instancia. No habilita APIs ni ejecuta SQL.
 
+## Evaluación FinOps y salud cloud
+
+El assessment requiere una allowlist de proyectos administrada por el equipo
+(`finops_projects` o las allowlists de origen/destino). El usuario puede
+reducirla con `--projects`, pero nunca ampliarla. Concede únicamente acceso de
+lectura a Cloud Asset Inventory y Recommender en esos proyectos.
+
+Las métricas de BigQuery y Billing Export se ejecutan dentro de la instancia
+Workbench aprobada, no desde el equipo local. Configura los cuatro campos de
+Workbench y, si aplica, una tabla `project.dataset.table` de Billing Export:
+
+```bash
+queryflow init --profile pilot \
+  --finops-projects FINOPS_PROJECT \
+  --billing-export-table BILLING_PROJECT.DATASET.TABLE \
+  --business-context-path business-context.toml
+```
+
+El mapa empresarial debe ser un archivo TOML administrado por el equipo y no
+debe contener credenciales. Revisa la cobertura de `owner`, `business_unit`,
+`cost_center` y `criticality` en el informe; la herramienta guarda solo los
+campos resueltos y un fingerprint del mapa. Billing Export es opcional: si no
+está disponible, el assessment lo informa y conserva las otras señales.
+
+La operación es siempre de solo lectura y `plan_only`. El equipo de plataforma
+debe validar cada hallazgo y usar un proceso de cambio independiente para
+mutaciones futuras.
+
 ## Perfiles y publicación force
 
 `pilot` permite copias nuevas, `team` permite actualizaciones aprobadas y

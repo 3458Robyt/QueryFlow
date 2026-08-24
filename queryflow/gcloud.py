@@ -7,7 +7,7 @@ import json
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Mapping, Sequence
+from typing import Any, Mapping, Sequence
 
 
 @dataclass(frozen=True)
@@ -46,13 +46,16 @@ class GcloudContext:
         text: bool = True,
         **kwargs: object,
     ) -> subprocess.CompletedProcess[str]:
+        run_kwargs: dict[str, Any] = {
+            "check": check,
+            "capture_output": capture_output,
+            "text": text,
+            "env": self.environment(),
+            **kwargs,
+        }
         return subprocess.run(
             self.command(args, account=account),
-            check=check,
-            capture_output=capture_output,
-            text=text,
-            env=self.environment(),
-            **kwargs,
+            **run_kwargs,
         )
 
     def json(self, args: Sequence[str], *, account: str | None = None) -> object:

@@ -116,9 +116,40 @@ gcloud_config_dir = "~/.config/gcloud"
     assert "token" not in path.read_text(encoding="utf-8").lower()
 
 
-def test_new_config_writes_schema_three(tmp_path):
+def test_new_config_writes_schema_four(tmp_path):
     path = tmp_path / "new.toml"
     document = ConfigStore(path).initialize(profile="pilot", values={"mode": "pilot"})
 
-    assert document.schema_version == 3
-    assert ConfigStore(path).load().schema_version == 3
+    assert document.schema_version == 4
+    assert ConfigStore(path).load().schema_version == 4
+
+
+def test_loads_finops_profile_fields_without_affecting_task_settings(tmp_path):
+    path = tmp_path / "finops.toml"
+    path.write_text(
+        """
+schema_version = 4
+active_profile = "pilot"
+
+[project_aliases]
+analytics = "analytics-project"
+
+[profiles.pilot]
+mode = "pilot"
+finops_projects = ["analytics"]
+billing_export_table = "billing-project.export.costs"
+business_context_path = "context.toml"
+finops_window_days = 45
+source_projects = ["analytics-project"]
+destination_projects = ["analytics-project"]
+""",
+        encoding="utf-8",
+    )
+
+    config = load_config(path)
+
+    assert config.finops_projects == ("analytics",)
+    assert config.billing_export_table == "billing-project.export.costs"
+    assert config.business_context_path == "context.toml"
+    assert config.finops_window_days == 45
+    assert config.source_projects == ("analytics-project",)

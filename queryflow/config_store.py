@@ -15,7 +15,7 @@ class ConfigStoreError(RuntimeError):
 
 
 FORBIDDEN_KEYS = {"token", "access_token", "refresh_token", "password", "secret", "private_key"}
-CURRENT_SCHEMA_VERSION = 3
+CURRENT_SCHEMA_VERSION = 4
 DEFAULT_PREFERENCES = {
     "review_theme": "dark",
     "review_mode": "unified",
@@ -75,7 +75,7 @@ class ConfigStore:
         raw_schema_version = int(raw.get("schema_version", 1))
         # Preserve the v1 compatibility marker expected by older task/config
         # readers; any newly written or already-v2 document is upgraded to the
-        # context-aware schema v3.
+        # context-aware schema v4.
         schema_version = 2 if raw_schema_version <= 1 else max(raw_schema_version, CURRENT_SCHEMA_VERSION)
         return ConfigDocument(
             schema_version=schema_version,

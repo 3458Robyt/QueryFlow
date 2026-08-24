@@ -1759,7 +1759,9 @@ class CliTests(unittest.TestCase):
                     ),
                 )
             task = root / "update-publish"
-            (task / "content.sql").write_text("SELECT 2;\n", encoding="utf-8")
+            # Keep the fixture byte-identical across platforms: publication
+            # verifies the exact content returned by the remote provider.
+            (task / "content.sql").write_bytes(b"SELECT 2;\n")
             with patch(
                 "queryflow.cli.dry_run_sql",
                 return_value=ValidationResult([], "read_only", True, dry_run_ok=True),

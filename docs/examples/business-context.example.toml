@@ -1,0 +1,18 @@
+schema_version = 1
+
+[label_keys]
+business_unit = "business_unit"
+owner = "owner"
+cost_center = "cost_center"
+criticality = "criticality"
+
+[projects.analytics-project]
+business_unit = "analytics"
+owner = "data-platform"
+cost_center = "CC-0000"
+criticality = "medium"
+
+[resources."projects/analytics-project/locations/us/datasets/reporting"]
+business_unit = "finance"
+owner = "finance-analytics"
+criticality = "high"
