@@ -8,11 +8,13 @@ from queryflow.config import QueryflowConfig
 from queryflow.finops import (
     FinOpsError,
     build_aggregate_queries,
+    build_report,
     generate_findings,
     load_assessment,
     load_business_context,
     resolve_projects,
     run_assessment,
+    render_html,
 )
 from queryflow.workbench import build_aggregate_payload, parse_aggregate_summary
 
@@ -166,6 +168,25 @@ owner = "resource-owner"
         })
         self.assertEqual(len(findings), 2)
         self.assertTrue(all(item["action_mode"] == "plan_only" for item in findings))
+
+    def test_html_report_escapes_provider_text(self):
+        findings = generate_findings({
+            "resources": [],
+            "recommendations": [{
+                "recommendation_id": "r-xss",
+                "project": "allowed-project",
+                "recommender": "google.run.service.CostRecommender",
+                "description": "<script>alert(1)</script>",
+                "resource_ids": [],
+                "impact": {},
+            }],
+            "aggregates": {},
+            "context_coverage": {},
+        })
+        report = build_report({"assessment_id": "a", "projects": [], "resources": [], "recommendations": [], "sources": {}, "aggregates": {}, "context_coverage": {}}, findings)
+        rendered = render_html(report)
+        self.assertIn("&lt;script&gt;alert(1)&lt;/script&gt;", rendered)
+        self.assertNotIn("<script>alert(1)</script>", rendered)
 
 
 class WorkbenchAggregateTests(unittest.TestCase):

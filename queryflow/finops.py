@@ -894,6 +894,13 @@ def render_html(report: Mapping[str, Any]) -> str:
         f'{esc(" ".join(str(step) for step in item.get("steps", [])))}</li>'
         for item in report.get("governed_plan", [])
     )
+    coverage_sources = (report.get("coverage") or {}).get("sources") or {}
+    coverage_html = "".join(
+        f"<li><strong>{esc(name)}</strong>: {esc(value.get('status'))}</li>"
+        for name, value in sorted(coverage_sources.items())
+        if isinstance(value, dict)
+    ) or "<li>Sin fuentes registradas</li>"
+    verified_html = "".join(f"<li>{esc(value)}</li>" for value in report.get("verified_signals", [])) or "<li>Sin señales verificadas</li>"
     limitations = "".join(f"<li>{esc(value)}</li>" for value in (report.get("technical_appendix") or {}).get("limitations", []))
     return f"""<!doctype html>
 <html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -902,6 +909,7 @@ def render_html(report: Mapping[str, Any]) -> str:
 <body><a href="#contenido">Saltar al contenido</a><main id="contenido"><header><h1>Evaluación FinOps</h1><p><strong>{esc(report.get('assessment_id'))}</strong> · {esc(report.get('status'))}</p><p>{esc(report.get('executive_summary'))}</p></header>
 <section aria-labelledby="metricas"><h2 id="metricas">Métricas clave</h2><ul>{metric_html}</ul></section>
 <section aria-labelledby="oportunidades"><h2 id="oportunidades">Oportunidades</h2>{opportunities}</section>
+<section aria-labelledby="cobertura"><h2 id="cobertura">Cobertura y señales verificadas</h2><ul>{coverage_html}</ul><ul>{verified_html}</ul></section>
 <section aria-labelledby="plan"><h2 id="plan">Plan gobernado</h2><ol>{plan}</ol></section>
 <section aria-labelledby="limitaciones"><h2 id="limitaciones">Limitaciones</h2><ul>{limitations}</ul></section>
 </main></body></html>
