@@ -984,7 +984,12 @@ def run_assessment(
     context = GcloudContext(config.gcloud_config_dir, account=account or config.account)
     resources, asset_status = collect_asset_inventory(selected, context, runner=runner)
     resources, coverage = _contextualize_resources(resources, business_context)
-    locations = config.allowed_locations or ("global",)
+    discovered_locations = {
+        _bigquery_location(str(resource.get("location")))
+        for resource in resources
+        if isinstance(resource, dict) and resource.get("location") and resource.get("location") != "global"
+    }
+    locations = config.allowed_locations or tuple(sorted({"global", *discovered_locations}))
     recommendations, recommendation_status = collect_recommendations(selected, context, locations=locations, runner=runner)
     aggregates, aggregate_status = collect_aggregates(
         selected,
