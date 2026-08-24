@@ -114,6 +114,7 @@ owner = "resource-owner"
         with tempfile.TemporaryDirectory() as temporary:
             result = run_assessment(
                 _config(
+                    account="analyst@example.com",
                     workbench_project="workbench-project",
                     workbench_location="us-central1-b",
                     workbench_instance="instance",
@@ -129,6 +130,7 @@ owner = "resource-owner"
             self.assertEqual(loaded["manifest"]["action_mode"], "plan_only")
             evidence = json.loads((Path(result["directory"]) / "evidence.json").read_text(encoding="utf-8"))
             self.assertNotIn("labels", evidence["resources"][0])
+            self.assertNotIn("analyst@example.com", json.dumps(evidence))
             report = json.loads((Path(result["directory"]) / "report.json").read_text(encoding="utf-8"))
             self.assertIn("technical_appendix", report)
             self.assertEqual(result["manifest"]["source_status"]["billing_export"], "ok")

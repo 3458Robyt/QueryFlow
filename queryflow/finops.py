@@ -1025,7 +1025,7 @@ def run_assessment(
         "schema_version": ASSESSMENT_SCHEMA_VERSION,
         "assessment_id": "pending",
         "generated_at": _iso(timestamp),
-        "account": account or config.account,
+        "identity": {"configured": bool(account or config.account)},
         "projects": list(selected),
         "window": {
             "days": days,
@@ -1059,7 +1059,7 @@ def run_assessment(
         "assessment_id": evidence["assessment_id"],
         "kind": "finops_health",
         "generated_at": evidence["generated_at"],
-        "account": evidence["account"],
+        "identity": evidence["identity"],
         "projects": selected,
         "window": evidence["window"],
         "source_status": {name: value.get("status") for name, value in sources.items()},
