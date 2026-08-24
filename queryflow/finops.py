@@ -246,8 +246,11 @@ def _resource_project(name: str, fallback: str) -> str:
 
 
 def _resource_location(name: str) -> str:
-    match = re.search(r"(?:^|/)locations/([^/]+)(?:/|$)", name)
-    return match.group(1) if match else "global"
+    for segment in ("locations", "zones", "regions"):
+        match = re.search(rf"(?:^|/){segment}/([^/]+)(?:/|$)", name)
+        if match:
+            return match.group(1)
+    return "global"
 
 
 def _strip_provider_prefix(name: str) -> str:
