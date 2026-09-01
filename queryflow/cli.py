@@ -92,6 +92,7 @@ from .migration_pilot import (
     _selection,
     validate_pilot_manifest,
 )
+from .finops import load_assessment, run_assessment, serve_assessment
 
 
 class CliError(RuntimeError):
@@ -206,6 +207,10 @@ def _cmd_init(args: argparse.Namespace) -> int:
         "allow_force_publish": profile == "full-access",
         "allow_migration_pilot": profile == "migration-pilot",
         "allow_migration_cleanup": False,
+        "finops_projects": [item for item in (args.finops_projects or "").split(",") if item.strip()],
+        "billing_export_table": args.billing_export_table or "",
+        "business_context_path": args.business_context_path or "",
+        "finops_window_days": args.finops_window_days or 30,
     }
     try:
         store = ConfigStore(path)
@@ -1469,6 +1474,61 @@ def _cmd_review(args: argparse.Namespace) -> int:
     if args.serve:
         server, url = serve_review(task, args.port, preferences)
         print(f"Review disponible en {url}", flush=True)
+        try:
+            server.serve_forever()
+        finally:
+            server.server_close()
+    return 0
+
+
+def _cmd_finops_assess(args: argparse.Namespace) -> int:
+    config = _config(args)
+    result = run_assessment(
+        config,
+        account=args.account,
+        projects=args.projects,
+        window_days=args.window_days,
+        billing_table=args.billing_table,
+        business_context_path=Path(args.business_context).expanduser() if args.business_context else None,
+        output_root=Path(args.output_root).expanduser() if args.output_root else None,
+    )
+    payload = {
+        "assessment": result["manifest"],
+        "directory": result["directory"],
+        "report": {
+            "status": result["report"].get("status"),
+            "executive_summary": result["report"].get("executive_summary"),
+            "finding_count": len(result["report"].get("opportunities", [])),
+        },
+    }
+    _print_result(payload, args.json)
+    return 0 if result["manifest"].get("status") != "failed" else 2
+
+
+def _cmd_finops_show(args: argparse.Namespace) -> int:
+    loaded = load_assessment(
+        args.assessment,
+        output_root=Path(args.output_root).expanduser() if args.output_root else None,
+    )
+    _print_result(loaded, args.json)
+    return 0
+
+
+def _cmd_finops_review(args: argparse.Namespace) -> int:
+    loaded = load_assessment(
+        args.assessment,
+        output_root=Path(args.output_root).expanduser() if args.output_root else None,
+    )
+    result = {
+        "assessment": loaded["manifest"],
+        "directory": loaded["directory"],
+        "review": str(Path(loaded["directory"]) / "report.html"),
+        "read_only": True,
+    }
+    _print_result(result, args.json)
+    if args.serve:
+        server, url = serve_assessment(args.assessment, output_root=Path(args.output_root).expanduser() if args.output_root else None, port=args.port)
+        print(f"Review FinOps disponible en {url}", flush=True)
         try:
             server.serve_forever()
         finally:
@@ -2787,6 +2847,10 @@ def _parser() -> argparse.ArgumentParser:
     init.add_argument("--workbench-job-project")
     init.add_argument("--validation-backend", choices=("local", "workbench"), default="workbench")
     init.add_argument("--max-bytes", type=int)
+    init.add_argument("--finops-projects", help="proyectos permitidos para evaluaciones FinOps, separados por coma")
+    init.add_argument("--billing-export-table", help="tabla opcional de Billing Export project.dataset.table")
+    init.add_argument("--business-context-path", help="mapa TOML opcional de contexto empresarial")
+    init.add_argument("--finops-window-days", type=int, default=30)
     init.add_argument("--json", action="store_true")
     init.set_defaults(func=_cmd_init)
 
@@ -2947,6 +3011,31 @@ def _parser() -> argparse.ArgumentParser:
     profile.add_argument("--output")
     profile.add_argument("--json", action="store_true")
     profile.set_defaults(func=_cmd_profile)
+
+    finops = sub.add_parser("finops", help="evaluar FinOps y salud cloud sin escrituras")
+    finops_sub = finops.add_subparsers(dest="finops_command", required=True)
+    assess = finops_sub.add_parser("assess", help="crear un assessment gobernado bajo demanda")
+    assess.add_argument("--config")
+    assess.add_argument("--account")
+    assess.add_argument("--projects", nargs="+")
+    assess.add_argument("--window-days", type=int)
+    assess.add_argument("--billing-table")
+    assess.add_argument("--business-context")
+    assess.add_argument("--output-root")
+    assess.add_argument("--json", action="store_true")
+    assess.set_defaults(func=_cmd_finops_assess)
+    show_finops = finops_sub.add_parser("show", help="mostrar un assessment verificado")
+    show_finops.add_argument("--assessment", required=True)
+    show_finops.add_argument("--output-root")
+    show_finops.add_argument("--json", action="store_true")
+    show_finops.set_defaults(func=_cmd_finops_show)
+    review_finops = finops_sub.add_parser("review", help="abrir el informe FinOps de solo lectura")
+    review_finops.add_argument("--assessment", required=True)
+    review_finops.add_argument("--output-root")
+    review_finops.add_argument("--serve", action="store_true")
+    review_finops.add_argument("--port", type=int, default=8080)
+    review_finops.add_argument("--json", action="store_true")
+    review_finops.set_defaults(func=_cmd_finops_review)
 
     start = sub.add_parser("start")
     start.add_argument("--resource")

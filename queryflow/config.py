@@ -52,6 +52,10 @@ class QueryflowConfig:
     review_mode: str = "unified"
     review_only_changes: bool = True
     review_context_lines: int = 3
+    finops_projects: tuple[str, ...] = ()
+    billing_export_table: Optional[str] = None
+    business_context_path: Optional[str] = None
+    finops_window_days: int = 30
 
     @property
     def workbench_instance_project(self) -> Optional[str]:
@@ -148,6 +152,10 @@ def load_config(path: Optional[Path] = None) -> QueryflowConfig:
         review_mode=_review_mode(raw.get("review_mode")),
         review_only_changes=bool(raw.get("review_only_changes", True)),
         review_context_lines=_review_context_lines(raw.get("review_context_lines")),
+        finops_projects=_string_tuple(raw.get("finops_projects")),
+        billing_export_table=_optional_text(raw.get("billing_export_table")),
+        business_context_path=_optional_text(raw.get("business_context_path")),
+        finops_window_days=_finops_window_days(raw.get("finops_window_days")),
     )
 
 
@@ -225,6 +233,10 @@ def _load_toml_config(path: Path) -> QueryflowConfig:
         review_mode=_review_mode(profile.get("review_mode", preferences.get("review_mode"))),
         review_only_changes=bool(profile.get("review_only_changes", preferences.get("review_only_changes", True))),
         review_context_lines=_review_context_lines(profile.get("review_context_lines", preferences.get("review_context_lines"))),
+        finops_projects=_string_tuple(profile.get("finops_projects")),
+        billing_export_table=_optional_text(profile.get("billing_export_table")),
+        business_context_path=_optional_text(profile.get("business_context_path")),
+        finops_window_days=_finops_window_days(profile.get("finops_window_days")),
     )
 
 
@@ -272,3 +284,13 @@ def _review_context_lines(value: Any) -> int:
     if lines < 0 or lines > 20:
         raise ConfigError("review_context_lines debe estar entre 0 y 20")
     return lines
+
+
+def _finops_window_days(value: Any) -> int:
+    try:
+        days = int(value if value is not None else 30)
+    except (TypeError, ValueError) as error:
+        raise ConfigError("finops_window_days debe ser entero") from error
+    if days < 1 or days > 365:
+        raise ConfigError("finops_window_days debe estar entre 1 y 365")
+    return days

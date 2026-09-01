@@ -66,7 +66,7 @@ class MigrationDictionaryTests(unittest.TestCase):
                         "id": "staging-001",
                         "zone": "staging",
                         "old": "source-project.analytics_internal",
-                        "new": "analytics-123.staging",
+                        "new": "destination-project.staging",
                         "active": True,
                     },
                 ],

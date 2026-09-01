@@ -1,24 +1,24 @@
 {
   "name": "queryflow",
   "version": "0.3.0b1",
-  "description": "Flujo seguro para crear, revisar, validar y publicar SQL en Google Cloud.",
+  "description": "Flujo gobernado para SQL, notebooks y evaluaciones FinOps de solo lectura en Google Cloud.",
   "author": {
     "name": "QueryFlow"
   },
   "repository": "https://github.com/3458Robyt/QueryFlow",
-  "keywords": ["sql", "bigquery", "workbench", "review"],
+  "keywords": ["sql", "bigquery", "workbench", "review", "finops", "cloud-health"],
   "skills": "./skills/",
   "interface": {
     "displayName": "QueryFlow",
-    "shortDescription": "SQL revisable con contexto, diff y publicación controlada.",
-    "longDescription": "Guía a Codex y al analista por un flujo de catálogo, contexto de proyectos, tarea aislada, diff web, validación, muestra aprobada y publicación auditable.",
+    "shortDescription": "SQL revisable y FinOps gobernado con evidencia de GCP.",
+    "longDescription": "Guía a Codex por el flujo existente de catálogo, contexto, tareas, diff, validación y publicación, y añade evaluaciones FinOps bajo demanda con fuentes por capas, cobertura empresarial y planes de solo lectura.",
     "developerName": "QueryFlow",
     "category": "Developer tools",
     "capabilities": ["Read", "Write"],
     "websiteURL": "https://github.com/3458Robyt/QueryFlow",
     "defaultPrompt": [
       "Usa QueryFlow para crear o modificar una query y mostrar el diff antes de publicar.",
-      "Valida esta query con dry-run y prepara una muestra de tres filas con digest aprobado.",
+      "Evalúa FinOps y salud cloud en los proyectos permitidos y resume oportunidades con evidencia.",
       "Confirma el contexto origen/destino antes de editar o publicar."
     ],
     "brandColor": "#1f6feb"
