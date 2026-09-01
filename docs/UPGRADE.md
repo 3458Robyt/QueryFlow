@@ -15,9 +15,11 @@ queryflow doctor --json
 Los nuevos comandos `status`, `diagnose` y `exception prepare` son opcionales.
 El perfil `pilot` sigue siendo el predeterminado y la excepción estática está
 deshabilitada. Ahora puedes usar `context` para fijar origen/destino,
-`permissions` para seleccionar `pilot`, `team` o `full-access`, y declarar la
-instancia Workbench con campos explícitos. Las consultas programadas, la
-migración de rutas y el diccionario continúan fuera del flujo principal.
+`permissions` para seleccionar `pilot`, `team`, `full-access` o el perfil
+independiente `migration-pilot`, y declarar la instancia Workbench con campos
+explícitos. Las consultas programadas continúan fuera del piloto. La migración
+de rutas solo se ejecuta mediante el manifest 10+10 y los comandos documentados
+en [MIGRATION_PILOT.md](MIGRATION_PILOT.md).
 
 Si el entorno hereda `CLOUDSDK_CONFIG` desde una sesión temporal, QueryFlow usa
 `~/.config/gcloud` por defecto. Comprueba la ruta efectiva con

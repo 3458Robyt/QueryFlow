@@ -43,6 +43,7 @@ def extract_code_cells(raw: bytes) -> list[tuple[int, str, str]]:
         language = str(
             metadata.get("language")
             or notebook.get("metadata", {}).get("kernelspec", {}).get("language")
+            or notebook.get("metadata", {}).get("language_info", {}).get("name")
             or "sql"
         ).lower()
         result.append((index, language, _cell_source(cell)))

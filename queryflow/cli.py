@@ -6,12 +6,14 @@ import importlib.util
 import json
 import os
 import re
+import random
 import shutil
 import subprocess
 import sys
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Mapping, Optional
 
 from .audit import AuditError, GcsAuditStore, LocalAuditStore
 from . import __version__ as PACKAGE_VERSION
@@ -34,7 +36,7 @@ from .errors import (
     read_diagnostic,
     write_diagnostic,
 )
-from .dataform import DataformClient, ExportedAsset, DataformError
+from .dataform import DataformClient, DataformRateLimitError, ExportedAsset, DataformError
 from .gcloud import GcloudContext
 from .notebooks import (
     analyze_sql_fragments,
@@ -62,6 +64,34 @@ from .sample import execution_digest
 from .workbench import WorkbenchSettings, execute_workbench_sample, validate_workbench_fragments
 from .workspace import create_workspace, read_manifest, update_manifest
 from .schedule import ScheduleError, ScheduleSpec
+from .migration import (
+    MigrationDictionaryError,
+    load_dictionary,
+    render_markdown,
+    rewrite_task,
+    validate_dictionary,
+)
+from .migration_pilot import (
+    CampaignError,
+    InventoryCheckpoint,
+    PilotManifest,
+    PilotQuotas,
+    build_manifest,
+    campaign_publish_digest,
+    cleanup_digest,
+    load_manifest,
+    load_inventory_checkpoint,
+    make_cleanup_plan,
+    make_inventory_incident_report,
+    migration_publish_allowed,
+    make_incident_report,
+    render_campaign_review,
+    save_manifest,
+    save_inventory_checkpoint,
+    select_classified,
+    _selection,
+    validate_pilot_manifest,
+)
 from .finops import load_assessment, run_assessment, serve_assessment
 
 
@@ -110,6 +140,8 @@ def _modern_policy(config: QueryflowConfig) -> Policy:
         allow_update_existing=config.allow_update_existing and config.mode in {"team", "full-access"},
         allow_force_publish=config.allow_force_publish and config.mode == "full-access",
         allow_static_exception=config.allow_static_exception and config.mode == "team",
+        allow_migration_pilot=config.mode == "migration-pilot",
+        allow_migration_cleanup=config.mode == "migration-pilot",
         allowed_resource_kinds=("notebook", "shared_query"),
         allowed_source_projects=config.source_projects,
         allowed_destination_projects=config.destination_projects,
@@ -147,8 +179,8 @@ def _cmd_version(args: argparse.Namespace) -> int:
 def _cmd_init(args: argparse.Namespace) -> int:
     path = Path(args.path).expanduser() if args.path else default_config_path()
     profile = args.profile or "pilot"
-    if profile not in {"pilot", "team", "full-access"}:
-        raise CliError("--profile debe ser pilot, team o full-access")
+    if profile not in {"pilot", "team", "full-access", "migration-pilot"}:
+        raise CliError("--profile debe ser pilot, team, full-access o migration-pilot")
     aliases: dict[str, str] = {}
     for raw_alias in args.project_alias or []:
         if "=" not in raw_alias:
@@ -173,6 +205,8 @@ def _cmd_init(args: argparse.Namespace) -> int:
         "sample_max_rows": 5,
         "allow_update_existing": profile in {"team", "full-access"},
         "allow_force_publish": profile == "full-access",
+        "allow_migration_pilot": profile == "migration-pilot",
+        "allow_migration_cleanup": False,
         "finops_projects": [item for item in (args.finops_projects or "").split(",") if item.strip()],
         "billing_export_table": args.billing_export_table or "",
         "business_context_path": args.business_context_path or "",
@@ -1363,7 +1397,7 @@ def _cmd_sample(args: argparse.Namespace) -> int:
     elif len(fragments) > 1:
         raise CliError("Un notebook con varias consultas requiere --fragment")
     expected_digest = execution_digest(selected[0][1], fragment_index=selected[0][0], limit=limit)
-    if args.approved_digest != expected_digest:
+    if getattr(args, "approved_digest", None) != expected_digest:
         raise CliError("El digest de muestra no coincide con el SQL, fragmento o límite actuales")
     if (args.backend or config.validation_backend) != "workbench":
         raise CliError("La ejecución muestral solo está habilitada dentro de Workbench")
@@ -1900,6 +1934,890 @@ def _cmd_publish(args: argparse.Namespace) -> int:
     return 0
 
 
+def _migration_dictionary(args: argparse.Namespace):
+    try:
+        return load_dictionary(Path(args.dictionary).expanduser())
+    except MigrationDictionaryError as error:
+        raise CliError(str(error)) from error
+
+
+def _cmd_migration_dictionary(args: argparse.Namespace) -> int:
+    dictionary = _migration_dictionary(args)
+    if args.dictionary_command == "validate":
+        _print_result(validate_dictionary(Path(args.dictionary).expanduser()), args.json)
+        return 0
+    if args.dictionary_command == "render":
+        rendered = render_markdown(dictionary)
+        if args.output:
+            output = Path(args.output).expanduser()
+            output.parent.mkdir(parents=True, exist_ok=True)
+            output.write_text(rendered, encoding="utf-8")
+            _print_result({"ok": True, "path": str(output), "dictionary_sha256": dictionary.dictionary_sha256}, args.json)
+        else:
+            print(rendered, end="")
+        return 0
+    raise CliError(f"Comando migration dictionary no soportado: {args.dictionary_command}")
+
+
+def _cmd_migration_rewrite(args: argparse.Namespace) -> int:
+    dictionary = _migration_dictionary(args)
+    task = Path(args.task).expanduser().resolve()
+    try:
+        report = rewrite_task(
+            task,
+            dictionary,
+            apply=args.rewrite_command == "apply",
+            expected_plan_digest=getattr(args, "plan_digest", None),
+        )
+    except MigrationDictionaryError as error:
+        raise CliError(str(error)) from error
+    _print_result(report.to_dict(), args.json)
+    return 0
+
+
+def _local_snapshot_for(resource: ResourceRef, directory: Path) -> tuple[bytes, str] | None:
+    """Resolve a private local snapshot without exposing its filename in a manifest."""
+    key = hashlib.sha256(resource.name.encode("utf-8")).hexdigest()
+    safe_name = re.sub(r"[^A-Za-z0-9_.-]+", "-", resource.display_name).strip("-")
+    candidates = [
+        directory / key,
+        directory / f"{key}.sql",
+        directory / f"{key}.ipynb",
+        directory / f"{key}.txt",
+        directory / safe_name,
+        directory / f"{safe_name}.sql",
+        directory / f"{safe_name}.ipynb",
+    ]
+    for path in candidates:
+        if path.exists() and path.is_file():
+            return path.read_bytes(), path.name
+    return None
+
+
+def _limit_pilot_resource_pool(
+    resources: list[ResourceRef],
+    *,
+    seed: str,
+    limit: int | None,
+) -> list[ResourceRef]:
+    """Choose a deterministic, de-duplicated candidate pool per resource kind."""
+    if limit is not None and limit <= 0:
+        raise CliError("--max-resources-per-kind debe ser mayor que cero")
+    by_name = {resource.name: resource for resource in resources if resource.kind in {"notebook", "shared_query"}}
+    selected_by_kind: dict[str, list[ResourceRef]] = {}
+    for kind in ("shared_query", "notebook"):
+        values = sorted((resource for resource in by_name.values() if resource.kind == kind), key=lambda item: item.name)
+        randomizer = random.Random(int(hashlib.sha256(f"{seed}:{kind}".encode("utf-8")).hexdigest()[:16], 16))
+        randomizer.shuffle(values)
+        selected_by_kind[kind] = values if limit is None else values[:limit]
+    selected: list[ResourceRef] = []
+    max_count = max((len(values) for values in selected_by_kind.values()), default=0)
+    for index in range(max_count):
+        for kind in ("shared_query", "notebook"):
+            values = selected_by_kind[kind]
+            if index < len(values):
+                selected.append(values[index])
+    return selected
+
+
+DEFAULT_DATAFORM_REQUESTS_PER_MINUTE = 180
+MAX_DATAFORM_REQUESTS_PER_MINUTE = 300
+DEFAULT_DATAFORM_MAX_RETRIES = 5
+DATAFORM_QUOTA_REGION = "us-east1"
+
+
+def _dataform_rate_limit(args: argparse.Namespace) -> int:
+    """Validate the pilot client limit against the project quota."""
+    try:
+        value = int(getattr(args, "dataform_requests_per_minute", DEFAULT_DATAFORM_REQUESTS_PER_MINUTE))
+    except (TypeError, ValueError) as error:
+        raise CliError("--dataform-requests-per-minute debe ser un entero") from error
+    if value <= 0 or value > MAX_DATAFORM_REQUESTS_PER_MINUTE:
+        raise CliError(
+            f"--dataform-requests-per-minute debe estar entre 1 y {MAX_DATAFORM_REQUESTS_PER_MINUTE}"
+        )
+    return value
+
+
+def _dataform_policy(args: argparse.Namespace) -> dict[str, Any]:
+    """Return the quota policy recorded in pilot artifacts, without secrets."""
+    return {
+        "region": DATAFORM_QUOTA_REGION,
+        "quota_requests_per_minute": MAX_DATAFORM_REQUESTS_PER_MINUTE,
+        "client_limit_requests_per_minute": _dataform_rate_limit(args),
+        "max_retries": DEFAULT_DATAFORM_MAX_RETRIES,
+        "backoff_seconds": [5, 10, 20, 40, 60],
+    }
+
+
+def _campaign_inventory_checkpoint_path(output_path: Path) -> Path:
+    return output_path.with_name("inventory-checkpoint.json")
+
+
+def _merge_dataform_stats(previous: Mapping[str, Any], current: Mapping[str, Any]) -> dict[str, Any]:
+    integer_fields = ("requests_attempted", "requests_succeeded", "retries", "rate_limit_responses")
+    merged = {
+        field: int(previous.get(field, 0) or 0) + int(current.get(field, 0) or 0)
+        for field in integer_fields
+    }
+    merged["rate_limit_wait_seconds"] = round(
+        float(previous.get("rate_limit_wait_seconds", 0.0) or 0.0)
+        + float(current.get("rate_limit_wait_seconds", 0.0) or 0.0),
+        3,
+    )
+    return merged
+
+
+def _campaign_manifest_path(config: QueryflowConfig, campaign_id: str) -> Path:
+    return config.workspace_root.parent / "migrations" / campaign_id / "manifest.json"
+
+
+def _write_campaign_incident_report(manifest: PilotManifest, manifest_path: Path) -> Path:
+    path = manifest_path.with_name("route-incidents.json")
+    path.write_text(json.dumps(make_incident_report(manifest), ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return path
+
+
+def _write_campaign_inventory_incident_report(
+    selections: list[Any],
+    manifest_path: Path,
+    *,
+    campaign_id: str,
+) -> Path:
+    """Persist route evidence even when strict quotas block a manifest."""
+    path = manifest_path.with_name("route-incidents.json")
+    payload = make_inventory_incident_report(selections, campaign_id=campaign_id)
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return path
+
+
+def _write_campaign_inventory_error_report(
+    errors: list[dict[str, Any]],
+    manifest_path: Path,
+    *,
+    dataform_policy: Mapping[str, Any] | None = None,
+    dataform_stats: Mapping[str, Any] | None = None,
+) -> Path | None:
+    if not errors:
+        return None
+    path = manifest_path.with_name("inventory-errors.json")
+    payload = {
+        "schema_version": 1,
+        "status": "partial_inventory",
+        "error_count": len(errors),
+        "errors": errors,
+        "dataform_policy": dict(dataform_policy or {}),
+        "dataform_stats": dict(dataform_stats or {}),
+        "policy": "Los recursos con error se omiten de la selección; no se fabrican hashes ni clasificaciones.",
+    }
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return path
+
+
+def _write_campaign_inventory_shortfall_report(
+    manifest_path: Path,
+    *,
+    source_project: str,
+    destination_project: str,
+    seed: str,
+    candidate_pool_count: int,
+    resources_read: int,
+    category_counts: Mapping[str, Mapping[str, int]],
+    inventory_errors: list[dict[str, Any]],
+    dataform_policy: Mapping[str, Any] | None = None,
+    dataform_stats: Mapping[str, Any] | None = None,
+) -> Path:
+    required = PilotQuotas().to_dict()
+    available = {
+        kind: {category: int(values.get(category, 0)) for category in required}
+        for kind, values in category_counts.items()
+    }
+    missing = {
+        kind: {category: max(required[category] - values.get(category, 0), 0) for category in required}
+        for kind, values in available.items()
+    }
+    path = manifest_path.with_name("inventory-shortfall.json")
+    payload = {
+        "schema_version": 1,
+        "status": "quota_shortfall",
+        "source_project": source_project,
+        "destination_project": destination_project,
+        "seed": seed,
+        "candidate_pool_count": candidate_pool_count,
+        "resources_read": resources_read,
+        "required_per_kind": required,
+        "available_per_kind": available,
+        "missing_per_kind": missing,
+        "inventory_errors": inventory_errors,
+        "dataform_policy": dict(dataform_policy or {}),
+        "dataform_stats": dict(dataform_stats or {}),
+        "policy": "No se crea manifest ni se publica mientras falte un estrato; amplía el pool o revisa el diccionario.",
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return path
+
+
+def _cmd_pilot_inventory(args: argparse.Namespace) -> int:
+    config = _config(args)
+    dictionary = _migration_dictionary(args)
+    catalog_path = Path(args.catalog).expanduser() if args.catalog else config.catalog_path
+    try:
+        catalog = load_catalog(catalog_path)
+    except Exception as error:
+        raise CliError(f"No se pudo leer el catálogo: {error}") from error
+    source_project = _resolve_config_project(config, args.source_project) or args.source_project
+    destination_project = _resolve_config_project(config, args.destination_project) or args.destination_project
+    if not source_project or not destination_project:
+        raise CliError("El inventario requiere --source-project y --destination-project")
+    destination_names = [
+        resource.display_name
+        for resource in catalog.resources
+        if resource.project == destination_project and resource.kind in {"notebook", "shared_query"}
+    ]
+    destination_name_set = {value.strip().casefold() for value in destination_names if value.strip()}
+    resources = [
+        resource
+        for resource in catalog.resources
+        if resource.project == source_project and resource.kind in {"notebook", "shared_query"}
+        and (not resource.display_name.strip() or resource.display_name.strip().casefold() not in destination_name_set)
+    ]
+    pool_seed = args.seed or dictionary.dictionary_sha256[:16]
+    resources = _limit_pilot_resource_pool(
+        resources,
+        seed=pool_seed,
+        limit=args.max_resources_per_kind,
+    )
+    requested_output = Path(args.output).expanduser() if args.output else None
+    checkpoint_manifest_path = requested_output or (
+        config.workspace_root.parent / "migrations" / f"inventory-{pool_seed}" / "manifest.json"
+    )
+    checkpoint_path = _campaign_inventory_checkpoint_path(checkpoint_manifest_path)
+    resume_inventory = bool(getattr(args, "resume_inventory", False))
+    if resume_inventory and not checkpoint_path.exists():
+        raise CliError(f"No existe el checkpoint de inventario: {checkpoint_path}")
+    if not resume_inventory and checkpoint_path.exists():
+        raise CliError(
+            f"Ya existe un checkpoint de inventario en {checkpoint_path}; "
+            "usa --resume-inventory o cambia --output"
+        )
+    # Asset Inventory fingerprints are etags/update timestamps, while the
+    # publication conflict check needs the Dataform commit SHA.  Replace the
+    # catalog fingerprint with that read-only Dataform head whenever remote
+    # inventory is used; local snapshots intentionally retain their catalog
+    # fingerprint and are for planning/classification only.
+    inventory_resources: dict[str, ResourceRef] = {resource.name: resource for resource in resources}
+    checkpoint: InventoryCheckpoint | None = None
+    previous_stats: Mapping[str, Any] = {}
+    if resume_inventory:
+        try:
+            checkpoint = load_inventory_checkpoint(checkpoint_path)
+        except CampaignError as error:
+            raise CliError(str(error)) from error
+        expected_context = {
+            "source_project": source_project,
+            "destination_project": destination_project,
+            "dictionary_sha256": dictionary.dictionary_sha256,
+            "seed": pool_seed,
+            "catalog_generated_at": catalog.generated_at,
+        }
+        actual_context = {
+            "source_project": checkpoint.source_project,
+            "destination_project": checkpoint.destination_project,
+            "dictionary_sha256": checkpoint.dictionary_sha256,
+            "seed": checkpoint.seed,
+            "catalog_generated_at": checkpoint.catalog_generated_at,
+        }
+        if actual_context != expected_context:
+            raise CliError("El checkpoint no coincide con el catálogo, diccionario, semilla o proyectos actuales")
+        pool_names = set(inventory_resources)
+        if any(item.resource.name not in pool_names for item in checkpoint.selections):
+            raise CliError("El checkpoint contiene recursos fuera del pool actual; genera un inventario nuevo")
+        inspected_selections = list(checkpoint.selections)
+        previous_stats = checkpoint.stats.get("dataform", checkpoint.stats) if isinstance(checkpoint.stats, Mapping) else {}
+        previous_errors = {
+            str(item["resource"]["name"]): dict(item)
+            for item in checkpoint.inventory_errors
+            if isinstance(item.get("resource"), Mapping) and item["resource"].get("name")
+        }
+    else:
+        inspected_selections = []
+        previous_errors = {}
+    selected_names = {item.resource.name for item in inspected_selections}
+    inventory_errors_by_name = {name: item for name, item in previous_errors.items() if name not in selected_names}
+    contents: dict[str, bytes] = {}
+    filenames: dict[str, str] = {}
+    category_counts: dict[str, dict[str, int]] = {
+        kind: {category: 0 for category in PilotQuotas().to_dict()}
+        for kind in ("shared_query", "notebook")
+    }
+    for item in inspected_selections:
+        if item.resource.kind in category_counts and item.category in category_counts[item.resource.kind]:
+            category_counts[item.resource.kind][item.category] += 1
+    resources_read = len(inspected_selections)
+    snapshots = Path(args.content_dir).expanduser() if args.content_dir else None
+    client = None
+    dataform_policy = _dataform_policy(args)
+    if snapshots is None:
+        if not args.account:
+            raise CliError("--account es obligatorio cuando inventory lee recursos remotos")
+        requests_per_minute = dataform_policy["client_limit_requests_per_minute"]
+        client = _configure_dataform_client(
+            DataformClient(
+                args.account,
+                destination_project,
+                source_project=source_project,
+                request_timeout_seconds=args.request_timeout,
+                requests_per_minute=requests_per_minute,
+                max_retries=DEFAULT_DATAFORM_MAX_RETRIES,
+            ),
+            config,
+            args.account,
+        )
+    def current_errors() -> list[dict[str, Any]]:
+        return [inventory_errors_by_name[name] for name in sorted(inventory_errors_by_name)]
+
+    def checkpoint_stats() -> dict[str, Any]:
+        current = client.request_stats.to_dict() if client is not None and hasattr(client, "request_stats") else {}
+        dataform_stats = _merge_dataform_stats(previous_stats, current)
+        return {
+            "dataform": dataform_stats,
+            "dataform_policy": dataform_policy,
+            "candidate_pool_count": len(resources),
+            "resources_read": resources_read,
+        }
+
+    def persist_checkpoint(status: str) -> None:
+        save_inventory_checkpoint(
+            InventoryCheckpoint(
+                source_project=source_project,
+                destination_project=destination_project,
+                dictionary_sha256=dictionary.dictionary_sha256,
+                seed=pool_seed,
+                catalog_generated_at=catalog.generated_at,
+                selections=tuple(inspected_selections),
+                inventory_errors=tuple(current_errors()),
+                stats=checkpoint_stats(),
+                status=status,
+                updated_at=datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            ),
+            checkpoint_path,
+        )
+
+    retry_names = set(inventory_errors_by_name)
+    retry_resources = [resource for resource in resources if resource.name in retry_names]
+    fresh_resources = [
+        resource
+        for resource in resources
+        if resource.name not in retry_names and resource.name not in selected_names
+    ]
+    ordered_resources = retry_resources + fresh_resources
+    quota_exhausted = False
+    for resource in ordered_resources:
+        if resource.name in selected_names:
+            continue
+        try:
+            if snapshots is not None:
+                snapshot = _local_snapshot_for(resource, snapshots)
+                if snapshot is None:
+                    raise CampaignError("No se encontró snapshot local para el recurso")
+                content, filename = snapshot
+            else:
+                exported = client.export(resource)
+                content, filename = exported.content, exported.filename
+                inventory_resources[resource.name] = replace(resource, fingerprint=exported.head_commit)
+            contents[resource.name] = content
+            filenames[resource.name] = filename
+            inspected = _selection(inventory_resources[resource.name], content, dictionary, filename)
+            inspected_selections.append(inspected)
+            category_counts[resource.kind][inspected.category] += 1
+            resources_read += 1
+            selected_names.add(resource.name)
+            inventory_errors_by_name.pop(resource.name, None)
+            persist_checkpoint("partial")
+        except Exception as error:
+            # An inventory is read-only; leave the resource out and report the
+            # problem instead of fabricating a classification.
+            record = {
+                "resource": resource.to_dict(),
+                "error": redact_message(str(error))[:500],
+            }
+            if isinstance(error, DataformRateLimitError):
+                record["error_kind"] = "quota"
+                quota_exhausted = True
+            inventory_errors_by_name[resource.name] = record
+            persist_checkpoint("rate_limited" if quota_exhausted else "partial")
+            if quota_exhausted:
+                break
+            continue
+        if all(
+            category_counts[kind][category] >= quota
+            for kind in ("shared_query", "notebook")
+            for category, quota in PilotQuotas().to_dict().items()
+        ):
+            persist_checkpoint("quota_reached")
+            break
+    inventory_errors = current_errors()
+    try:
+        manifest = select_classified(
+            inspected_selections,
+            source_project=source_project,
+            destination_project=destination_project,
+            dictionary=dictionary,
+            seed=pool_seed,
+            campaign_id=args.campaign_id,
+            catalog_generated_at=catalog.generated_at,
+        )
+    except CampaignError as error:
+        # Preserve fetch diagnostics even when the available resources cannot
+        # satisfy the 5/3/2 quotas and no manifest can be created yet.
+        report_base = requested_output or checkpoint_manifest_path
+        report_base.parent.mkdir(parents=True, exist_ok=True)
+        provisional_manifest = build_manifest(
+            inspected_selections,
+            source_project=source_project,
+            destination_project=destination_project,
+            dictionary=dictionary,
+            seed=pool_seed,
+            campaign_id=args.campaign_id,
+            catalog_generated_at=catalog.generated_at,
+        )
+        incidents_path = _write_campaign_inventory_incident_report(
+            inspected_selections,
+            report_base,
+            campaign_id=provisional_manifest.campaign_id,
+        )
+        errors_path = _write_campaign_inventory_error_report(
+            inventory_errors,
+            report_base,
+            dataform_policy=dataform_policy,
+            dataform_stats=checkpoint_stats().get("dataform", {}),
+        )
+        shortfall_path = _write_campaign_inventory_shortfall_report(
+            report_base,
+            source_project=source_project,
+            destination_project=destination_project,
+            seed=pool_seed,
+            candidate_pool_count=len(resources),
+            resources_read=resources_read,
+            category_counts=category_counts,
+            inventory_errors=inventory_errors,
+            dataform_policy=dataform_policy,
+            dataform_stats=checkpoint_stats().get("dataform", {}),
+        )
+        details = f"{error}. Reporte de cupo: {shortfall_path}; incidentes de rutas: {incidents_path}; checkpoint: {checkpoint_path}"
+        if errors_path:
+            details += f"; errores de lectura: {errors_path}"
+        raise CliError(details) from error
+    # Keep filename snapshots private to the local inventory directory; the
+    # manifest stores only content hashes and classification evidence.
+    path = requested_output or _campaign_manifest_path(config, manifest.campaign_id)
+    save_manifest(manifest, path)
+    persist_checkpoint("complete")
+    incidents_path = _write_campaign_incident_report(manifest, path)
+    inventory_errors_path = _write_campaign_inventory_error_report(
+        inventory_errors,
+        path,
+        dataform_policy=dataform_policy,
+        dataform_stats=checkpoint_stats().get("dataform", {}),
+    )
+    _print_result(
+        {
+            "ok": True,
+            "manifest": str(path),
+            "campaign_id": manifest.campaign_id,
+            "source_project": source_project,
+            "destination_project": destination_project,
+            "seed": manifest.seed,
+            "selection_count": len(manifest.selections),
+            "kind_quotas": {kind: quota.to_dict() for kind, quota in manifest.kind_quotas.items()},
+            "candidate_pool_count": len(resources),
+            "resources_read": resources_read,
+            "category_counts": category_counts,
+            "write_enabled": False,
+            "route_incidents": str(incidents_path),
+            "inventory_errors": str(inventory_errors_path) if inventory_errors_path else None,
+            "inventory_error_count": len(inventory_errors),
+            "dataform": checkpoint_stats().get("dataform", {}),
+            "dataform_policy": dataform_policy,
+            "checkpoint": str(checkpoint_path),
+        },
+        args.json,
+    )
+    return 0
+
+
+def _systemic_campaign_error(error: Exception) -> bool:
+    text = str(error).casefold()
+    return any(token in text for token in ("vpc", "service controls", "permission", "unauthenticated", "authentication", "credential", "network", "transport"))
+
+
+def _cmd_pilot_prepare(args: argparse.Namespace) -> int:
+    config = _config(args)
+    try:
+        manifest_path = Path(args.manifest).expanduser()
+        manifest = load_manifest(manifest_path)
+        dictionary = _migration_dictionary(args)
+        validate_pilot_manifest(manifest)
+    except (CampaignError, MigrationDictionaryError) as error:
+        raise CliError(str(error)) from error
+    if manifest.dictionary_sha256 != dictionary.dictionary_sha256:
+        raise CliError("El diccionario no coincide con el hash de la campaña")
+    if config.profile_name != "migration-pilot":
+        raise CliError("La preparación de campaña requiere el perfil migration-pilot")
+    if not config.source_projects or manifest.source_project not in config.source_projects:
+        raise CliError("La campaña no coincide con la allowlist de proyectos origen configurada")
+    if not config.destination_projects or manifest.destination_project not in config.destination_projects:
+        raise CliError("La campaña no coincide con la allowlist de proyectos destino configurada")
+    if not args.account:
+        raise CliError("--account es obligatorio para preparar la campaña")
+    dataform_policy = _dataform_policy(args)
+    client = _configure_dataform_client(
+        DataformClient(
+            args.account,
+            manifest.destination_project,
+            source_project=manifest.source_project,
+            request_timeout_seconds=args.request_timeout,
+            requests_per_minute=dataform_policy["client_limit_requests_per_minute"],
+            max_retries=DEFAULT_DATAFORM_MAX_RETRIES,
+        ),
+        config,
+        args.account,
+    )
+    campaign_root = config.workspace_root / "migration" / manifest.campaign_id
+    raw_manifest = manifest.to_dict()
+    execution = dict(raw_manifest.get("execution") or {})
+    prepared_count = 0
+    preferences = {
+        "review_theme": config.review_theme,
+        "review_mode": config.review_mode,
+        "review_only_changes": config.review_only_changes,
+        "review_context_lines": config.review_context_lines,
+    }
+    task_links: dict[str, str] = {}
+    for index, selection in enumerate(manifest.selections):
+        task_id = _safe_task_id(f"{manifest.campaign_id}-{selection.resource.kind}-{index:02d}")
+        existing = execution.get(selection.resource.name) or {}
+        existing_task = Path(str(existing.get("task") or "")) if existing.get("task") else None
+        existing_review = Path(str(existing.get("review") or "")) if existing.get("review") else None
+        if existing.get("status") == "prepared" and existing_task and existing_task.exists() and existing_review and existing_review.exists():
+            prepared_count += 1
+            task_links[selection.resource.name] = existing.get("review_relative", f"{task_id}/review.html")
+            continue
+        exported = client.export(selection.resource)
+        if exported.head_commit != selection.resource.fingerprint or hashlib.sha256(exported.content).hexdigest() != selection.content_sha256:
+            raise CliError(f"El recurso remoto cambió después del inventario: {selection.resource.name}")
+        task = create_workspace(
+            root=campaign_root,
+            task_id=task_id,
+            resource=selection.resource,
+            content=exported.content,
+            filename=exported.filename,
+            mode="copy",
+            account=args.account,
+        )
+        if selection.resource.kind == "notebook":
+            write_cell_workspace(exported.content, task / "cells")
+        report = rewrite_task(task, dictionary, apply=True)
+        validation = {
+            "schema_version": 1,
+            "status": "ready",
+            "method": "migration_rewrite",
+            "backend": "local",
+            "ok": True,
+            "publishable": False,
+            "dry_run": {"skipped": True, "reason": "El piloto de migración no ejecuta SQL"},
+            "static": {"read_only": True, "statement_class": "not_evaluated", "errors": [], "warnings": []},
+            "errors": [],
+            "content_sha256": report.proposed_sha256,
+            "migration": report.to_dict(),
+        }
+        update_manifest(
+            task,
+            validation_status="ready",
+            workflow_state="ready",
+            proposed_sha256=report.proposed_sha256,
+            migration_plan_digest=report.plan_digest,
+            migration_status="published_with_incidents" if report.unknown_routes else "rewritten",
+        )
+        (task / "validation.json").write_text(json.dumps(validation, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        review_path = write_review_html(
+            task,
+            exported.content,
+            (task / exported.filename).read_bytes(),
+            validation,
+            preferences,
+        )
+        execution[selection.resource.name] = {
+            "status": "prepared",
+            "task": str(task),
+            "review": str(review_path),
+            "review_relative": f"{task_id}/review.html",
+            "changed_files": list(report.changed_files),
+            "unknown_route_count": len(report.unknown_routes),
+            "proposed_sha256": report.proposed_sha256,
+        }
+        task_links[selection.resource.name] = f"{task_id}/review.html"
+        prepared_count += 1
+    raw_manifest["execution"] = execution
+    raw_manifest["status"] = "prepared"
+    prepared_manifest = PilotManifest.from_dict(raw_manifest)
+    save_manifest(prepared_manifest, manifest_path)
+    campaign_review = campaign_root / "review.html"
+    campaign_review.parent.mkdir(parents=True, exist_ok=True)
+    campaign_review.write_text(render_campaign_review(prepared_manifest, task_links=task_links), encoding="utf-8")
+    _print_result(
+        {
+            "ok": True,
+            "campaign_id": manifest.campaign_id,
+            "prepared_count": prepared_count,
+            "campaign_review": str(campaign_review),
+            "publication_digest": campaign_publish_digest(prepared_manifest),
+            "write_enabled": False,
+            "dataform": client.request_stats.to_dict(),
+            "dataform_policy": dataform_policy,
+        },
+        args.json,
+    )
+    return 0
+
+
+def _cmd_pilot_run(args: argparse.Namespace) -> int:
+    config = _config(args)
+    try:
+        manifest = load_manifest(Path(args.manifest).expanduser())
+        dictionary = _migration_dictionary(args)
+    except (CampaignError, MigrationDictionaryError) as error:
+        raise CliError(str(error)) from error
+    if manifest.dictionary_sha256 != dictionary.dictionary_sha256:
+        raise CliError("El diccionario no coincide con el hash de la campaña")
+    try:
+        validate_pilot_manifest(manifest)
+    except CampaignError as error:
+        raise CliError(str(error)) from error
+    dataform_policy = _dataform_policy(args)
+    if not args.execute_migration:
+        _print_result(
+            {
+                "ok": True,
+                "campaign_id": manifest.campaign_id,
+                "status": manifest.status,
+                "selection_count": len(manifest.selections),
+                "publication_digest": campaign_publish_digest(manifest),
+                "write_enabled": False,
+                "dataform_policy": dataform_policy,
+                "message": "Plan cargado; la publicación requiere --execute-migration y --approved-digest explícitos.",
+            },
+            args.json,
+        )
+        return 0
+    if not migration_publish_allowed(config.profile_name, execute_migration=True):
+        raise CliError("La ejecución del piloto requiere el perfil migration-pilot y --execute-migration")
+    expected_digest = campaign_publish_digest(manifest)
+    if args.approved_digest != expected_digest:
+        raise CliError("El digest de campaña no coincide; usa --approved-digest con el publication_digest exacto del plan")
+    if not config.source_projects or manifest.source_project not in config.source_projects:
+        raise CliError("La campaña no coincide con la allowlist de proyectos origen configurada")
+    if not config.destination_projects or manifest.destination_project not in config.destination_projects:
+        raise CliError("La campaña no coincide con la allowlist de proyectos destino configurada")
+    decision = evaluate_policy(
+        _modern_policy(config),
+        operation="campaign_publish",
+        resource_kind="shared_query",
+        mode="copy",
+        source_project=manifest.source_project,
+        destination_project=manifest.destination_project,
+    )
+    if not decision.allowed:
+        raise CliError(decision.message)
+    if not args.account:
+        raise CliError("--account es obligatorio para ejecutar la campaña")
+    if config.audit_root is None and not args.audit_root:
+        raise CliError("Configura audit_root antes de ejecutar la campaña")
+    client = _configure_dataform_client(
+        DataformClient(
+            args.account,
+            manifest.destination_project,
+            source_project=manifest.source_project,
+            request_timeout_seconds=getattr(args, "request_timeout", 30.0),
+            requests_per_minute=dataform_policy["client_limit_requests_per_minute"],
+            max_retries=DEFAULT_DATAFORM_MAX_RETRIES,
+        ),
+        config,
+        args.account,
+    )
+    campaign_root = config.workspace_root / "migration" / manifest.campaign_id
+    raw_manifest = manifest.to_dict()
+    execution = dict(raw_manifest.get("execution") or {})
+    cleanup_records = list((raw_manifest.get("cleanup") or {}).get("records") or [])
+    for index, selection in enumerate(manifest.selections):
+        key = selection.resource.name
+        if execution.get(key, {}).get("status") == "published":
+            continue
+        task_id = _safe_task_id(f"{manifest.campaign_id}-{selection.resource.kind}-{index:02d}")
+        record: dict[str, Any] = {"status": "pending", "task_id": task_id, "resource": selection.resource.to_dict()}
+        try:
+            exported = client.export(selection.resource)
+            if exported.head_commit != selection.resource.fingerprint or hashlib.sha256(exported.content).hexdigest() != selection.content_sha256:
+                raise CampaignError("El recurso remoto cambió después del inventario")
+            task = create_workspace(
+                root=campaign_root,
+                task_id=task_id,
+                resource=selection.resource,
+                content=exported.content,
+                filename=exported.filename,
+                mode="copy",
+                account=args.account,
+            )
+            if selection.resource.kind == "notebook":
+                write_cell_workspace(exported.content, task / "cells")
+            report = rewrite_task(task, dictionary, apply=True)
+            if config.audit_root is None and not args.audit_root:
+                raise CampaignError("audit_root no configurado")
+            audit_store = _audit_store(args.audit_root or config.audit_root, gcloud_context=_gcloud_context(config, args.account))
+            audit_receipt = audit_store.archive(task)
+            published = client.create_copy(
+                source=ExportedAsset(selection.resource, exported.filename, exported.content, exported.metadata, exported.head_commit),
+                destination_project=manifest.destination_project,
+                destination_repository_id=_safe_task_id(f"qflow-mig-{manifest.campaign_id[-10:]}-{index:02d}").lower(),
+                display_name=f"{selection.resource.display_name}{manifest.suffix}",
+                content=(task / exported.filename).read_bytes(),
+                author_name="QueryFlow migration pilot",
+                author_email=args.account,
+            )
+            # Register the repository immediately after the create call.  If
+            # read-back/audit fails, cleanup-plan can still present the exact
+            # copy for a separately approved cleanup instead of leaking it.
+            cleanup_records.append({"repository": published.get("repository"), "commit_sha": published.get("commit_sha"), "task_id": task_id})
+            saved = client.read_file(str(published["repository"]), exported.filename)
+            if hashlib.sha256(saved).hexdigest() != report.proposed_sha256:
+                raise CampaignError("La lectura posterior no coincide con la reescritura")
+            receipt = {"task_id": task_id, "published": published, "audit": audit_receipt, "rewrite": report.to_dict()}
+            audit_store.record_publish(task_id, receipt)
+            record.update({"status": "published", "repository": published.get("repository"), "commit_sha": published.get("commit_sha"), "receipt": receipt})
+        except Exception as error:
+            record.update({"status": "blocked" if _systemic_campaign_error(error) else "failed", "error": redact_message(str(error))[:500]})
+            execution[key] = record
+            raw_manifest["execution"] = execution
+            raw_manifest["cleanup"] = {"records": cleanup_records, "created_repositories": [item.get("repository") for item in cleanup_records if item.get("repository")]}
+            raw_manifest["status"] = "blocked" if record["status"] == "blocked" else "partial"
+            save_manifest(PilotManifest.from_dict(raw_manifest), Path(args.manifest).expanduser())
+            if record["status"] == "blocked":
+                raise CliError(str(error)) from error
+            continue
+        execution[key] = record
+        raw_manifest["execution"] = execution
+        raw_manifest["cleanup"] = {"records": cleanup_records, "created_repositories": [item.get("repository") for item in cleanup_records if item.get("repository")]}
+        raw_manifest["status"] = "running"
+        save_manifest(PilotManifest.from_dict(raw_manifest), Path(args.manifest).expanduser())
+    all_published = all(item.get("status") == "published" for item in execution.values())
+    has_incidents = any(item.unknown_routes for item in manifest.selections)
+    raw_manifest["status"] = "published_with_incidents" if all_published and has_incidents else "completed" if all_published else "partial"
+    save_manifest(PilotManifest.from_dict(raw_manifest), Path(args.manifest).expanduser())
+    final_manifest = PilotManifest.from_dict(raw_manifest)
+    incidents_path = _write_campaign_incident_report(final_manifest, Path(args.manifest).expanduser())
+    _print_result(
+        {
+            "ok": raw_manifest["status"] in {"completed", "published_with_incidents"},
+            "campaign_id": manifest.campaign_id,
+            "status": raw_manifest["status"],
+            "execution": execution,
+            "write_enabled": True,
+            "route_incidents": str(incidents_path),
+            "dataform": client.request_stats.to_dict(),
+            "dataform_policy": dataform_policy,
+        },
+        args.json,
+    )
+    return 0 if raw_manifest["status"] in {"completed", "published_with_incidents"} else 2
+
+
+def _cmd_pilot_review(args: argparse.Namespace) -> int:
+    try:
+        manifest = load_manifest(Path(args.manifest).expanduser())
+    except CampaignError as error:
+        raise CliError(str(error)) from error
+    output = Path(args.output).expanduser() if args.output else Path(args.manifest).expanduser().with_name("review.html")
+    output.parent.mkdir(parents=True, exist_ok=True)
+    task_links = {
+        str(name): str(record.get("review_relative"))
+        for name, record in (manifest.execution or {}).items()
+        if isinstance(record, Mapping) and record.get("review_relative")
+    }
+    output.write_text(render_campaign_review(manifest, task_links=task_links), encoding="utf-8")
+    _print_result({"ok": True, "review": str(output), "campaign_id": manifest.campaign_id, "read_only": True}, args.json)
+    return 0
+
+
+def _cmd_pilot_cleanup_plan(args: argparse.Namespace) -> int:
+    try:
+        manifest = load_manifest(Path(args.manifest).expanduser())
+    except CampaignError as error:
+        raise CliError(str(error)) from error
+    plan = make_cleanup_plan(manifest)
+    output = Path(args.output).expanduser() if args.output else Path(args.manifest).expanduser().with_name("cleanup-plan.json")
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(json.dumps(plan, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    _print_result({"ok": True, "cleanup_plan": str(output), **plan}, args.json)
+    return 0
+
+
+def _cmd_pilot_cleanup(args: argparse.Namespace) -> int:
+    config = _config(args)
+    if config.profile_name != "migration-pilot":
+        raise CliError("La limpieza solo está disponible en el perfil migration-pilot")
+    try:
+        manifest = load_manifest(Path(args.manifest).expanduser())
+    except CampaignError as error:
+        raise CliError(str(error)) from error
+    plan_path = Path(args.plan).expanduser() if args.plan else Path(args.manifest).expanduser().with_name("cleanup-plan.json")
+    if plan_path.exists():
+        try:
+            plan = json.loads(plan_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as error:
+            raise CliError(f"El plan de limpieza no es JSON válido: {error}") from error
+    else:
+        plan = make_cleanup_plan(manifest)
+    repositories = plan.get("repositories") if isinstance(plan, dict) else None
+    digest = plan.get("approved_digest") if isinstance(plan, dict) else None
+    if not isinstance(repositories, list) or not isinstance(digest, str):
+        raise CliError("El plan de limpieza está incompleto")
+    if args.approved_digest != digest or cleanup_digest(repositories) != digest:
+        raise CliError("El digest de limpieza no coincide con el conjunto exacto de repositorios")
+    if not config.destination_projects or manifest.destination_project not in config.destination_projects:
+        raise CliError("La campaña no coincide con la allowlist de proyectos destino configurada")
+    decision = evaluate_policy(_modern_policy(config), operation="campaign_cleanup", resource_kind="shared_query", mode="copy", destination_project=manifest.destination_project)
+    if not decision.allowed:
+        raise CliError(decision.message)
+    if not args.account:
+        raise CliError("--account es obligatorio para limpiar la campaña")
+    client = _configure_dataform_client(DataformClient(args.account, manifest.destination_project), config, args.account)
+    records_by_repo = {str(item.get("repository")): item for item in (manifest.cleanup.get("records") or []) if isinstance(item, dict)}
+    deleted: list[str] = []
+    skipped: list[dict[str, str]] = []
+    for repository in repositories:
+        expected = records_by_repo.get(repository, {}).get("commit_sha")
+        try:
+            current = client.latest_commit(repository)
+            if expected and current != expected:
+                skipped.append({"repository": repository, "reason": "head_changed"})
+                continue
+            client.delete_repository(repository, force=False)
+            try:
+                client.get_repository(ResourceRef("shared_query", repository, manifest.destination_project, "", repository.rsplit("/", 1)[-1], ""))
+            except DataformError as verify_error:
+                if any(token in str(verify_error).casefold() for token in ("404", "not found", "no encontrado")):
+                    deleted.append(repository)
+                else:
+                    skipped.append({"repository": repository, "reason": redact_message(str(verify_error))[:300]})
+            else:
+                skipped.append({"repository": repository, "reason": "delete_not_verified"})
+        except Exception as error:
+            skipped.append({"repository": repository, "reason": redact_message(str(error))[:300]})
+    _print_result({"ok": not skipped, "campaign_id": manifest.campaign_id, "approved_digest": digest, "deleted": deleted, "skipped": skipped, "force": False}, args.json)
+    return 0 if not skipped else 2
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="queryflow", description="Flujo seguro para SQL en Cloud Shell")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -1910,7 +2828,7 @@ def _parser() -> argparse.ArgumentParser:
 
     init = sub.add_parser("init", help="crear o reconfigurar perfiles locales")
     init.add_argument("--path")
-    init.add_argument("--profile", choices=("pilot", "team", "full-access"), default="pilot")
+    init.add_argument("--profile", choices=("pilot", "team", "full-access", "migration-pilot"), default="pilot")
     init.add_argument("--account")
     init.add_argument("--gcloud-config-dir")
     init.add_argument("--source-projects")
@@ -1995,7 +2913,7 @@ def _parser() -> argparse.ArgumentParser:
     permissions_show.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
     permissions_show.set_defaults(func=_cmd_permissions)
     permissions_use = permissions_sub.add_parser("use")
-    permissions_use.add_argument("profile", choices=("pilot", "team", "full-access"))
+    permissions_use.add_argument("profile", choices=("pilot", "team", "full-access", "migration-pilot"))
     permissions_use.add_argument("--config", default=argparse.SUPPRESS)
     permissions_use.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
     permissions_use.set_defaults(func=_cmd_permissions)
@@ -2009,7 +2927,7 @@ def _parser() -> argparse.ArgumentParser:
     show_policy.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
     show_policy.set_defaults(func=_cmd_policy)
     check_policy = policy_sub.add_parser("check")
-    check_policy.add_argument("--operation", choices=("validate", "publish", "execute", "delete"), required=True)
+    check_policy.add_argument("--operation", choices=("validate", "publish", "execute", "delete", "campaign_publish", "campaign_cleanup"), required=True)
     check_policy.add_argument("--resource-kind", choices=("notebook", "shared_query", "scheduled_query"), required=True)
     check_policy.add_argument("--mode", choices=("copy", "new", "update"), default="copy")
     check_policy.add_argument("--source-project")
@@ -2190,6 +3108,110 @@ def _parser() -> argparse.ArgumentParser:
     publish.add_argument("--config")
     publish.add_argument("--json", action="store_true")
     publish.set_defaults(func=_cmd_publish)
+
+    migration = sub.add_parser("migration", help="herramientas locales de diccionario y reescritura")
+    migration_sub = migration.add_subparsers(dest="migration_command", required=True)
+    dictionary = migration_sub.add_parser("dictionary", help="validar o renderizar el diccionario privado")
+    dictionary_sub = dictionary.add_subparsers(dest="dictionary_command", required=True)
+    dictionary_validate = dictionary_sub.add_parser("validate")
+    dictionary_validate.add_argument("--dictionary", required=True)
+    dictionary_validate.add_argument("--json", action="store_true")
+    dictionary_validate.set_defaults(func=_cmd_migration_dictionary)
+    dictionary_render = dictionary_sub.add_parser("render")
+    dictionary_render.add_argument("--dictionary", required=True)
+    dictionary_render.add_argument("--output")
+    dictionary_render.add_argument("--json", action="store_true")
+    dictionary_render.set_defaults(func=_cmd_migration_dictionary)
+
+    rewrite = migration_sub.add_parser("rewrite", help="planificar o aplicar rutas en una tarea local")
+    rewrite_sub = rewrite.add_subparsers(dest="rewrite_command", required=True)
+    rewrite_plan = rewrite_sub.add_parser("plan")
+    rewrite_plan.add_argument("--task", required=True)
+    rewrite_plan.add_argument("--dictionary", required=True)
+    rewrite_plan.add_argument("--json", action="store_true")
+    rewrite_plan.set_defaults(func=_cmd_migration_rewrite)
+    rewrite_apply = rewrite_sub.add_parser("apply")
+    rewrite_apply.add_argument("--task", required=True)
+    rewrite_apply.add_argument("--dictionary", required=True)
+    rewrite_apply.add_argument("--plan-digest", required=True)
+    rewrite_apply.add_argument("--json", action="store_true")
+    rewrite_apply.set_defaults(func=_cmd_migration_rewrite)
+
+    pilot = sub.add_parser("pilot", help="piloto de migración de 10 Shared Queries y 10 notebooks")
+    pilot_sub = pilot.add_subparsers(dest="pilot_command", required=True)
+    inventory = pilot_sub.add_parser("inventory", help="clasificar y seleccionar la muestra sin publicar")
+    inventory.add_argument("--dictionary", required=True)
+    inventory.add_argument("--catalog")
+    inventory.add_argument("--source-project", required=True)
+    inventory.add_argument("--destination-project", required=True)
+    inventory.add_argument("--account")
+    inventory.add_argument("--content-dir", help="directorio privado de snapshots; omite llamadas remotas")
+    inventory.add_argument("--request-timeout", type=float, default=30.0, help="timeout por solicitud HTTP de Dataform (segundos)")
+    inventory.add_argument(
+        "--dataform-requests-per-minute",
+        type=int,
+        default=DEFAULT_DATAFORM_REQUESTS_PER_MINUTE,
+        help="límite local de solicitudes Dataform por minuto (máximo 300)",
+    )
+    inventory.add_argument("--resume-inventory", action="store_true", help="reanudar desde el checkpoint privado del inventario")
+    inventory.add_argument("--seed")
+    inventory.add_argument("--max-resources-per-kind", type=int, help="limitar el pool aleatorio antes de exportar (opcional)")
+    inventory.add_argument("--campaign-id")
+    inventory.add_argument("--output")
+    inventory.add_argument("--config")
+    inventory.add_argument("--json", action="store_true")
+    inventory.set_defaults(func=_cmd_pilot_inventory)
+    prepare = pilot_sub.add_parser("prepare", help="crear tareas y diffs locales sin publicar")
+    prepare.add_argument("--manifest", required=True)
+    prepare.add_argument("--dictionary", required=True)
+    prepare.add_argument("--account", required=True)
+    prepare.add_argument("--request-timeout", type=float, default=30.0)
+    prepare.add_argument("--dataform-requests-per-minute", type=int, default=DEFAULT_DATAFORM_REQUESTS_PER_MINUTE)
+    prepare.add_argument("--config")
+    prepare.add_argument("--json", action="store_true")
+    prepare.set_defaults(func=_cmd_pilot_prepare)
+    run = pilot_sub.add_parser("run", help="reescribir y publicar copias del manifiesto")
+    run.add_argument("--manifest", required=True)
+    run.add_argument("--dictionary", required=True)
+    run.add_argument("--execute-migration", action="store_true", help="autoriza las copias nuevas de esta campaña")
+    run.add_argument("--approved-digest", help="digest de publicación aprobado explícitamente")
+    run.add_argument("--account")
+    run.add_argument("--audit-root")
+    run.add_argument("--request-timeout", type=float, default=30.0)
+    run.add_argument("--dataform-requests-per-minute", type=int, default=DEFAULT_DATAFORM_REQUESTS_PER_MINUTE)
+    run.add_argument("--config")
+    run.add_argument("--json", action="store_true")
+    run.set_defaults(func=_cmd_pilot_run)
+    resume = pilot_sub.add_parser("resume", help="reanudar los recursos pendientes de una campaña")
+    resume.add_argument("--manifest", required=True)
+    resume.add_argument("--dictionary", required=True)
+    resume.add_argument("--execute-migration", action="store_true")
+    resume.add_argument("--approved-digest", help="digest de publicación aprobado explícitamente")
+    resume.add_argument("--account")
+    resume.add_argument("--audit-root")
+    resume.add_argument("--request-timeout", type=float, default=30.0)
+    resume.add_argument("--dataform-requests-per-minute", type=int, default=DEFAULT_DATAFORM_REQUESTS_PER_MINUTE)
+    resume.add_argument("--config")
+    resume.add_argument("--json", action="store_true")
+    resume.set_defaults(func=_cmd_pilot_run)
+    pilot_review = pilot_sub.add_parser("review", help="crear preview batch de solo lectura")
+    pilot_review.add_argument("--manifest", required=True)
+    pilot_review.add_argument("--output")
+    pilot_review.add_argument("--json", action="store_true")
+    pilot_review.set_defaults(func=_cmd_pilot_review)
+    cleanup_plan = pilot_sub.add_parser("cleanup-plan", help="preparar digest de limpieza separado")
+    cleanup_plan.add_argument("--manifest", required=True)
+    cleanup_plan.add_argument("--output")
+    cleanup_plan.add_argument("--json", action="store_true")
+    cleanup_plan.set_defaults(func=_cmd_pilot_cleanup_plan)
+    cleanup = pilot_sub.add_parser("cleanup", help="eliminar únicamente copias de la campaña aprobada")
+    cleanup.add_argument("--manifest", required=True)
+    cleanup.add_argument("--plan")
+    cleanup.add_argument("--approved-digest", required=True)
+    cleanup.add_argument("--account")
+    cleanup.add_argument("--config")
+    cleanup.add_argument("--json", action="store_true")
+    cleanup.set_defaults(func=_cmd_pilot_cleanup)
     return parser
 
 

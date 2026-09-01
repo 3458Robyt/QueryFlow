@@ -98,7 +98,8 @@ queryflow context show --json
 ```
 
 Los perfiles disponibles son `pilot` (solo copias), `team` (actualizaciones
-aprobadas) y `full-access`. Este último no ejecuta SQL ni elimina recursos;
+aprobadas), `full-access` y el perfil independiente `migration-pilot`.
+`full-access` no ejecuta SQL ni elimina recursos;
 permite publicar un notebook o Shared Query con una orden explícita cuando el
 dry-run no está disponible:
 
@@ -112,6 +113,57 @@ queryflow publish --task TASK --force-publish \
 La publicación force exige recurso canónico, destino permitido, control de
 conflictos, auditoría y lectura de comprobación. Genera
 `force-authorization.json`; el flujo normal continúa usando digest.
+
+### Piloto de migración (10 + 10)
+
+La migración de rutas es un flujo separado. El diccionario se guarda en una
+ruta privada fuera de Git y se aplica únicamente sobre tareas locales. El
+piloto selecciona de forma reproducible 10 Shared Queries y 10 notebooks,
+clasificados por rutas conocidas, incidentes y ausencia de rutas de origen.
+No ejecuta SQL, no consulta tablas y nunca modifica el recurso original.
+
+```bash
+queryflow migration dictionary validate --dictionary PRIVATE/routes.json --json
+queryflow pilot inventory --dictionary PRIVATE/routes.json --catalog catalog.json \
+  --source-project SOURCE_PROJECT --destination-project DESTINATION_PROJECT \
+  --account analyst@example.com --request-timeout 30 \
+  --max-resources-per-kind 40 --dataform-requests-per-minute 180 \
+  --output PRIVATE/manifest.json --json
+```
+
+El inventario remoto respeta la cuota de Dataform de `us-east1` (300
+solicitudes/minuto) con un límite local de 180 solicitudes/minuto y reintentos
+controlados para `429`. Cada lectura se guarda en un checkpoint privado; si se
+interrumpe, repite el mismo comando con `--resume-inventory`.
+
+Después prepara las tareas locales y abre el diff batch, sin ejecutar SQL ni
+publicar nada:
+
+```bash
+queryflow pilot prepare --manifest PRIVATE/manifest.json \
+  --dictionary PRIVATE/routes.json --account analyst@example.com \
+  --dataform-requests-per-minute 180 --json
+queryflow pilot review --manifest PRIVATE/manifest.json
+queryflow pilot run --manifest PRIVATE/manifest.json --dictionary PRIVATE/routes.json
+```
+
+`prepare` crea un Web Preview por recurso y devuelve un `publication_digest`.
+El último comando solo muestra el plan. Para crear las copias nuevas, el
+analista debe cambiar explícitamente al perfil de campaña y aprobar ese digest:
+
+```bash
+queryflow permissions use migration-pilot
+queryflow pilot run --manifest PRIVATE/manifest.json \
+  --dictionary PRIVATE/routes.json --execute-migration \
+  --account analyst@example.com --approved-digest PUBLICATION_DIGEST --json
+```
+
+Las copias llevan el sufijo `_piloto_migracion`. Las rutas no cubiertas se
+conservan sin cambios y quedan en `route-incidents.json` (o en el estado final
+como `published_with_incidents`).
+La limpieza nunca es automática: primero genera un plan y un digest separados
+con `queryflow pilot cleanup-plan`; solo una aprobación explícita de ese digest
+permite `queryflow pilot cleanup`.
 
 ## Flujo de trabajo
 
@@ -246,8 +298,9 @@ limitaciones y pasos propuestos, pero no cambian recursos GCP.
   variable `CLOUDSDK_CONFIG` temporal heredada no reemplaza esa configuración.
 - Las muestras reales deben ejecutarse dentro del perímetro Workbench
   configurado y requieren confirmación explícita.
-- El diccionario de migración y la reescritura de rutas son procesos separados;
-  no forman parte de QueryFlow.
+- El diccionario de migración permanece privado y la reescritura de rutas está
+  separada del flujo normal; el piloto acotado la usa únicamente con su
+  manifest y sus controles propios.
 
 ## Documentación
 
@@ -263,6 +316,8 @@ limitaciones y pasos propuestos, pero no cambian recursos GCP.
 - [Evaluación FinOps y salud cloud](plugins/queryflow/skills/queryflow-finops/SKILL.md).
 - [Guía del administrador GCP](docs/ADMIN_GUIDE.md).
 - [Informe de aceptación beta](docs/BETA_ACCEPTANCE.md).
+- [Piloto de migración](docs/MIGRATION_PILOT.md): diccionario privado,
+  selección 10+10, publicación y limpieza separada.
 - [Seguridad](SECURITY.md) y [contribución](CONTRIBUTING.md).
 
 ## Desarrollo

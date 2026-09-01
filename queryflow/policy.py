@@ -47,6 +47,8 @@ class Policy:
     allow_update_existing: bool = False
     allow_force_publish: bool = False
     allow_static_exception: bool = False
+    allow_migration_pilot: bool = False
+    allow_migration_cleanup: bool = False
     allowed_resource_kinds: tuple[str, ...] = ("notebook", "shared_query")
     allowed_source_projects: tuple[str, ...] = ()
     allowed_destination_projects: tuple[str, ...] = ()
@@ -89,6 +91,8 @@ class Policy:
             allow_update_existing=bool(raw.get("allow_update_existing", base.allow_update_existing)),
             allow_force_publish=bool(raw.get("allow_force_publish", base.allow_force_publish)),
             allow_static_exception=bool(raw.get("allow_static_exception", base.allow_static_exception)),
+            allow_migration_pilot=bool(raw.get("allow_migration_pilot", base.allow_migration_pilot)),
+            allow_migration_cleanup=bool(raw.get("allow_migration_cleanup", base.allow_migration_cleanup)),
             allowed_resource_kinds=allowed_kinds,
             allowed_source_projects=_string_tuple(raw.get("allowed_source_projects"), base.allowed_source_projects),
             allowed_destination_projects=_string_tuple(
@@ -117,6 +121,8 @@ class Policy:
             "allow_update_existing": self.allow_update_existing,
             "allow_force_publish": self.allow_force_publish,
             "allow_static_exception": self.allow_static_exception,
+            "allow_migration_pilot": self.allow_migration_pilot,
+            "allow_migration_cleanup": self.allow_migration_cleanup,
             "allowed_resource_kinds": list(self.allowed_resource_kinds),
             "allowed_source_projects": list(self.allowed_source_projects),
             "allowed_destination_projects": list(self.allowed_destination_projects),
@@ -142,6 +148,10 @@ def evaluate_policy(
         return PolicyDecision(False, "operation.delete", "QueryFlow no permite eliminar recursos")
     if operation == "execute" and not policy.allow_sql_execution:
         return PolicyDecision(False, "operation.execute", "La ejecución requiere una política explícita")
+    if operation == "campaign_publish" and not policy.allow_migration_pilot:
+        return PolicyDecision(False, "operation.campaign_publish", "La publicación de campaña requiere el perfil migration-pilot y el interruptor explícito")
+    if operation == "campaign_cleanup" and not policy.allow_migration_cleanup:
+        return PolicyDecision(False, "operation.campaign_cleanup", "La limpieza de campaña requiere una autorización separada")
     if mode == "update" and not policy.allow_update_existing:
         return PolicyDecision(False, "mode.update", "El perfil actual solo permite copias y recursos nuevos")
     if policy.allowed_source_projects and source_project not in policy.allowed_source_projects:

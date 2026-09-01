@@ -32,6 +32,14 @@ salida vaya a ser procesada por Codex u otra herramienta.
 | `queryflow review` | Crear o servir el diff Web Preview. | no | no |
 | `queryflow sample` | Ejecutar una muestra aprobada dentro de Workbench. | sí | no |
 | `queryflow publish` | Crear una copia aprobada o actualizar en modo team. | sí | sí |
+| `queryflow migration dictionary` | Validar/renderizar el diccionario privado. | no | no |
+| `queryflow migration rewrite` | Planificar/aplicar rutas en una tarea local. | no | no |
+| `queryflow pilot inventory` | Seleccionar la muestra 10+10 sin escribir. | lectura | no |
+| `queryflow pilot prepare` | Crear tareas y Web Previews locales sin publicar. | lectura | no |
+| `queryflow pilot run` | Ejecutar el piloto y crear copias con autorización explícita. | sí | sí (solo copias) |
+| `queryflow pilot review` | Revisar el resumen batch en HTML. | no | no |
+| `queryflow pilot cleanup-plan` | Crear digest del conjunto de copias. | no | no |
+| `queryflow pilot cleanup` | Limpiar copias exactas con digest aprobado. | sí | sí (borrado acotado) |
 
 ## Instalación y configuración
 
@@ -45,7 +53,7 @@ queryflow version --json
 
 ### `queryflow init`
 
-Crea un perfil local. Opciones principales: `--profile pilot|team|full-access`,
+Crea un perfil local. Opciones principales: `--profile pilot|team|full-access|migration-pilot`,
 `--account`, `--gcloud-config-dir`, los proyectos y alias, los cuatro campos
 explícitos de Workbench (`--workbench-instance-project`,
 `--workbench-instance-location`, `--workbench-instance-name` y
@@ -88,7 +96,7 @@ queryflow context show --json
 ```
 
 Usa `permissions show` para ver el perfil activo y cambia entre `pilot`,
-`team` y `full-access` con `permissions use`. El perfil `full-access` no
+`team`, `full-access` y `migration-pilot` con `permissions use`. El perfil `full-access` no
 ejecuta SQL ni elimina recursos; únicamente habilita una publicación explícita
 de notebooks o Shared Queries sin digest cuando el analista proporciona un
 motivo auditable:
@@ -102,6 +110,11 @@ queryflow publish --task TASK --force-publish \
 
 La publicación force todavía exige destino permitido, control de conflicto,
 auditoría, `force-authorization.json` y lectura remota de comprobación.
+
+`migration-pilot` es un perfil separado para la campaña 10+10. Solo acepta el
+manifest generado por `pilot inventory` y el interruptor explícito
+`--execute-migration` más el digest aprobado; crea copias nuevas y no ejecuta SQL. Consulta
+[MIGRATION_PILOT.md](MIGRATION_PILOT.md) para el flujo completo.
 
 ### `queryflow finops`
 
@@ -347,3 +360,38 @@ queryflow profile --table source-project.dataset.table \
 ```
 
 Para diagnóstico de errores, consulta [TROUBLESHOOTING.md](TROUBLESHOOTING.md).
+
+## Piloto de migración
+
+`queryflow migration dictionary validate` comprueba el esquema y genera un hash
+del JSON privado. `render` crea una tabla Markdown para revisión.
+
+`queryflow migration rewrite plan` calcula un digest local de las rutas
+conocidas y de los incidentes; `apply` exige ese digest y solo escribe SQL o
+celdas de código. No consulta tablas ni ejecuta SQL.
+
+`queryflow pilot inventory` lee el catálogo y el código para clasificar y
+seleccionar 10 Shared Queries y 10 notebooks de forma determinista. Omite
+colisiones de nombre en el destino y detiene el proceso si no hay cupos. En
+catálogos grandes, `--max-resources-per-kind N` limita el pool aleatorio por
+tipo; `--request-timeout SECONDS` evita quedar bloqueado por un recurso.
+Dataform usa 180 solicitudes/minuto por defecto (la cuota del flujo es 300 en
+`us-east1`), reintenta `429` solo en lecturas y deja un
+`inventory-checkpoint.json` para `--resume-inventory`.
+
+`queryflow pilot prepare` vuelve a leer los recursos, comprueba sus hashes y
+crea una tarea y un Web Preview por selección. Es local, no ejecuta SQL y
+devuelve el `publication_digest` que debe aprobarse antes de publicar.
+
+`queryflow pilot run` sin `--execute-migration` es solo plan. Para publicar
+copias nuevas se requieren el perfil `migration-pilot` y el flag explícito:
+
+```bash
+queryflow pilot run --manifest PRIVATE/manifest.json \
+  --dictionary PRIVATE/routes.json --execute-migration \
+  --approved-digest PUBLICATION_DIGEST --account ACCOUNT --json
+```
+
+Las rutas no cubiertas permanecen intactas y quedan en el reporte. La limpieza
+separada exige primero `cleanup-plan` y después el digest exacto en `cleanup`;
+las copias con `head` cambiado se omiten.
