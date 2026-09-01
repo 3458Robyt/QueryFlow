@@ -61,10 +61,13 @@ queryflow context set --source replication --destination analytics
 queryflow context show --json
 ```
 
-Puedes cambiar el perfil local con `queryflow permissions use pilot|team|full-access`.
+Puedes cambiar el perfil local con `queryflow permissions use pilot|team|full-access|migration-pilot`.
 `full-access` solo está pensado para una orden explícita de publicación de un
 notebook o Shared Query cuando el dry-run no está disponible; no ejecuta SQL ni
 elimina recursos.
+
+Para probar la migración de rutas usa el perfil independiente
+`migration-pilot` y sigue la guía de [Piloto de migración](MIGRATION_PILOT.md).
 
 ## 3. Crear o modificar una query
 

@@ -20,6 +20,7 @@ EXCLUDED_PARTS = {
     "tasks",
     "reports",
     "pilot",
+    ".queryflow",
     "Diccionario.txt",
     "rewrite_notebook_routes.py",
     "migrate_notebooks_query.py",

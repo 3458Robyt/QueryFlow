@@ -105,8 +105,8 @@ def load_config(path: Optional[Path] = None) -> QueryflowConfig:
     audit_value = raw.get("audit_root")
     audit_root = str(audit_value) if audit_value else None
     mode = str(raw.get("mode") or "pilot")
-    if mode not in {"pilot", "team", "full-access"}:
-        raise ConfigError("mode debe ser pilot, team o full-access")
+    if mode not in {"pilot", "team", "full-access", "migration-pilot"}:
+        raise ConfigError("mode debe ser pilot, team, full-access o migration-pilot")
     validation_backend = str(raw.get("validation_backend") or "local")
     if validation_backend not in {"local", "workbench"}:
         raise ConfigError("validation_backend debe ser local o workbench")
@@ -175,9 +175,9 @@ def _load_toml_config(path: Path) -> QueryflowConfig:
     policy = Policy.from_mapping(raw.get("policy") if isinstance(raw.get("policy"), dict) else None)
     preferences_raw = raw.get("preferences")
     preferences: dict[str, Any] = dict(preferences_raw) if isinstance(preferences_raw, dict) else {}
-    mode = str(profile.get("mode") or {"team": "team", "full-access": "full-access"}.get(active, "pilot"))
-    if mode not in {"pilot", "team", "full-access"}:
-        raise ConfigError("mode debe ser pilot, team o full-access")
+    mode = str(profile.get("mode") or {"team": "team", "full-access": "full-access", "migration-pilot": "migration-pilot"}.get(active, "pilot"))
+    if mode not in {"pilot", "team", "full-access", "migration-pilot"}:
+        raise ConfigError("mode debe ser pilot, team, full-access o migration-pilot")
     max_bytes = int(profile.get("max_bytes") or policy.default_max_bytes)
     max_bytes = min(max_bytes, policy.max_bytes)
     workspace_root = Path(str(profile.get("workspace_root") or Path.home() / ".queryflow" / "tasks")).expanduser()

@@ -32,8 +32,14 @@ route below.
 - Use Workbench as the boundary for real dry-runs and samples. Never move row
   values to Cloud Shell, task files, audit archives, Git, or chat outside the
   approved bounded-sample interaction.
-- In the pilot, create copies only. Do not update, delete, enable schedules, or
-  bypass a policy failure.
+- In the normal `pilot`, create copies only. Do not update, delete, enable
+  schedules, or bypass a policy failure.
+- The separate `migration-pilot` profile is a bounded batch exception: it
+  accepts only a saved campaign manifest with 10 Shared Queries and 10
+  notebooks, rewrites routes locally from a private dictionary, never runs
+  SQL/table checks, and creates new copies only after the analyst explicitly
+  runs `queryflow pilot run --execute-migration`. It never updates source
+  assets. Cleanup is a separate digest-gated command.
 - In `pilot` and `team`, never publish without the exact digest supplied by the
   analyst.
 - In `full-access`, an analyst may explicitly order a notebook or Shared Query
@@ -106,6 +112,57 @@ diagnostics, presents the digest or records the explicit force authorization,
 publishes through QueryFlow, and reports read-back. QueryFlow remains
 deterministic; the agent must never invent a digest or silently select force
 mode.
+
+## Migration pilot (bounded exception)
+
+Use the migration tools only for the approved source/destination pair and a
+private dictionary that is kept outside Git:
+
+```bash
+queryflow migration dictionary validate --dictionary PRIVATE/routes.json --json
+queryflow pilot inventory --dictionary PRIVATE/routes.json --catalog catalog.json \
+  --source-project SOURCE_PROJECT --destination-project DESTINATION_PROJECT \
+  --account ACCOUNT --dataform-requests-per-minute 180 --json
+queryflow pilot review --manifest PRIVATE/manifest.json
+queryflow pilot run --manifest PRIVATE/manifest.json --dictionary PRIVATE/routes.json
+```
+
+The inventory reads code for classification, selects a deterministic 5/3/2
+sample per kind, and records only hashes, route mappings, and unknown-route
+incidents. The Dataform project quota is 300 requests/minute in `us-east1`;
+the client stays at 180, retries `429` reads with bounded backoff, and writes a
+checkpoint that can be resumed with `--resume-inventory`. The run command above
+is planning-only. To create local tasks and red/green Web Previews without SQL
+or publication, use:
+
+```bash
+queryflow pilot prepare --manifest PRIVATE/manifest.json \
+  --dictionary PRIVATE/routes.json --account ACCOUNT \
+  --dataform-requests-per-minute 180 --json
+```
+
+Publication requires the explicit switch, profile, and approved campaign
+digest:
+
+```bash
+queryflow permissions use migration-pilot
+queryflow pilot run --manifest PRIVATE/manifest.json \
+  --dictionary PRIVATE/routes.json --execute-migration \
+  --approved-digest PUBLICATION_DIGEST --account ACCOUNT --json
+```
+
+Unknown routes remain unchanged and produce `published_with_incidents`; they
+are never guessed. To remove only copies created by the campaign, prepare and
+approve a separate cleanup digest:
+
+```bash
+queryflow pilot cleanup-plan --manifest PRIVATE/manifest.json --json
+queryflow pilot cleanup --manifest PRIVATE/manifest.json \
+  --approved-digest CLEANUP_DIGEST --account ACCOUNT --json
+```
+
+This exception does not change the normal `pilot`, `team`, or `full-access`
+approval rules and does not execute SQL.
 
 ## Load details only when needed
 

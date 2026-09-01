@@ -33,9 +33,21 @@ reales.
 Las Shared Queries siguen siendo activos de BigQuery Studio/Dataform; QueryFlow
 no crea un repositorio paralelo ni reemplaza el historial remoto.
 
+## Piloto de migración opcional
+
+El piloto 10+10 vive detrás de comandos separados (`migration` y `pilot`). El
+catálogo y Dataform aportan únicamente el inventario/código; el diccionario
+privado y el reescritor son entradas aisladas y no cambian el flujo normal de
+QueryFlow. La campaña conserva hashes, semilla, rutas aplicadas e incidentes,
+pero no guarda SQL en la manifest. Solo el perfil `migration-pilot` junto con
+`--execute-migration` y un `publication_digest` aprobado puede crear copias
+nuevas; no hay `update`, SQL ejecutado ni dry-run implícito. La limpieza exige
+un plan y digest propios.
+
 ## Fronteras de seguridad
 
 Las excepciones estáticas están separadas del digest normal y desactivadas por
 defecto. Los diagnósticos se redactan antes de almacenarse y no incluyen
-tokens, filas ni SQL completo. La reescritura de rutas y el diccionario de
-migración no pertenecen a este producto.
+tokens, filas ni SQL completo. El diccionario de rutas continúa siendo un
+artefacto privado fuera del repositorio; el adaptador de campaña solo valida su
+hash y aplica reemplazos locales explícitos.
