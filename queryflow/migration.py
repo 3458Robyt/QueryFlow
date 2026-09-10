@@ -499,13 +499,19 @@ def rewrite_task(
     proposed_sha = hashlib.sha256(before_content).hexdigest()
     if apply:
         if kind == "notebook" and _notebook_code_files(task, manifest):
-            for relative, source in proposed_files.items():
-                _write_notebook_code_cell(task, relative, source)
-            # Import lazily to avoid an import cycle at module load time.
-            from .task import sync_notebook_task
+            # A freshly exported notebook has a cell workspace even when the
+            # dictionary produces no replacement.  Rebuilding it in that case
+            # can normalize JSON formatting and change the content hash despite
+            # there being no migration edit.  Only sync when a code cell really
+            # changed; otherwise preserve the exact exported bytes.
+            if changed:
+                for relative, source in proposed_files.items():
+                    _write_notebook_code_cell(task, relative, source)
+                # Import lazily to avoid an import cycle at module load time.
+                from .task import sync_notebook_task
 
-            current = sync_notebook_task(task)
-            proposed_sha = hashlib.sha256(current).hexdigest()
+                current = sync_notebook_task(task)
+                proposed_sha = hashlib.sha256(current).hexdigest()
         elif kind == "shared_query":
             target = _safe_task_file(task, filename)
             target.write_text(proposed_files[filename], encoding="utf-8")

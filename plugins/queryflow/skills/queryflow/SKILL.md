@@ -28,7 +28,8 @@ route below.
 - Use the configured persistent gcloud directory (`~/.config/gcloud`). A
   temporary inherited `CLOUDSDK_CONFIG` does not replace it unless the profile
   explicitly sets another directory.
-- Treat unknown, dynamic, multi-statement, and mutating SQL as blocked.
+- In normal `pilot`, `team`, `full-access`, and `migration-pilot` workflows,
+  treat unknown, dynamic, multi-statement, and mutating SQL as blocked.
 - Use Workbench as the boundary for real dry-runs and samples. Never move row
   values to Cloud Shell, task files, audit archives, Git, or chat outside the
   approved bounded-sample interaction.
@@ -40,6 +41,33 @@ route below.
   SQL/table checks, and creates new copies only after the analyst explicitly
   runs `queryflow pilot run --execute-migration`. It never updates source
   assets. Cleanup is a separate digest-gated command.
+- For new route migrations use the official `migration-batch` profile and
+  `queryflow migration batch`. It accepts an explicit selection of
+  `shared_query`/`notebook` resources, preserves visible names, rewrites code
+  locally from the private dictionary, and accepts only these review-required
+  code-copy warnings: unknown routes, dynamic SQL, mutating SQL, and SQL that
+  cannot be classified. With `operation=copy` it creates new repositories;
+  with `operation=update` it updates the current destination repository in
+  place after checking its head commit. Both operations require one global
+  digest approval. It never runs SQL or a dry-run. Embedded secrets,
+  empty/malformed assets, conflicts, drift, authentication, transport, audit,
+  and read-back failures remain hard blocks. Resources with accepted warnings receive
+  `queryflow_review=required` and `queryflow_state=pending`; those labels are
+  metadata for human review, not an execution permission. `queryflow pilot` is
+  a deprecated compatibility alias for the old 10+10 pilot.
+- For stored procedures use `queryflow migration routines` with the explicit
+  `migration-batch` profile and `allow_routine_migration=true`. This workflow
+  inventories BigQuery `routines` through REST (or the configured Workbench
+  gateway), rewrites table routes and calls to the destination `functions`
+  dataset, and creates a copy-only manifest. It never submits a SQL job, runs
+  `CALL`, or performs a dry-run. It includes GoogleSQL procedures and
+  recursively referenced SQL/JavaScript routines; Spark procedures and other
+  unsupported types are reported. Missing dependencies, conflicts, secrets,
+  authentication, VPC, transport, source drift, and read-back failures stay
+  blocked. Dynamic/mutating SQL and unknown routes may be copied only as
+  explicitly labelled human-review warnings. Publication requires the exact
+  routine digest; `--lot` uses that lot's digest. See
+  [references/routines.md](references/routines.md).
 - In `pilot` and `team`, never publish without the exact digest supplied by the
   analyst.
 - In `full-access`, an analyst may explicitly order a notebook or Shared Query
@@ -93,10 +121,13 @@ overrides syntax, policy, conflict, not-found, or integrity blocks.
 ## Stop and report
 
 Stop before any write when the catalog is stale, policy denies the operation,
-SQL is not provably read-only, Workbench configuration is incomplete, the
-digest is stale/mismatched, remote head changed, or validation returns VPC,
-permission, authentication, transport, or SQL errors. Explain the rule that
-blocked the action and the next safe diagnostic; do not suggest a bypass.
+the digest is stale/mismatched, remote head changed, or validation returns
+VPC, permission, authentication, transport, SQL, audit, conflict, or
+integrity errors. In normal workflows, also stop when SQL is not provably
+read-only. The sole code-copy exception is `migration-batch`: its manifest may
+contain the four review-required warning classes above, but never a hard
+block. Explain the rule that blocked the action and the next safe diagnostic;
+do not suggest a bypass.
 
 An explicit force publication is not a generic bypass: it is limited to the
 full-access profile and still stops on a wrong resource, destination, remote
@@ -112,6 +143,39 @@ diagnostics, presents the digest or records the explicit force authorization,
 publishes through QueryFlow, and reports read-back. QueryFlow remains
 deterministic; the agent must never invent a digest or silently select force
 mode.
+
+## Explicit migration batch
+
+Use this flow for a new, explicit list of resources. For a complete notebook
+campaign, generate region-aware selections from a fresh catalog first; do not
+hardcode a historical resource count in the agent instructions:
+
+```bash
+queryflow permissions use migration-batch
+queryflow migration batch inventory --selection-file SELECTION.json \
+  --dictionary PRIVATE/routes.json --catalog ~/.queryflow/catalog.json \
+  --account ACCOUNT --json
+queryflow migration batch prepare --manifest PRIVATE/manifest.json \
+  --dictionary PRIVATE/routes.json --account ACCOUNT --json
+queryflow migration batch review --manifest PRIVATE/manifest.json --serve
+```
+
+Present `publication_digest` and wait for a single explicit approval. Then run
+`migration batch run` with `--execute-migration --approved-digest DIGEST`.
+For an in-place correction, set `operation=update` in the selection, use the
+same source and destination project, and enable `allow_update_existing=true`
+in `team` or `full-access`; the command edits the existing repository and
+never creates a second copy. `resume` retries only pending resources with the
+same digest. Inspect
+`migration-report.md` for every unmatched route (resource, file/cell and line),
+static statement class, review reason, and hard blocker. Accepted warnings
+are copied as code only and remain labelled pending human review. Do not
+execute a BigQuery query or dry-run as part of this flow.
+
+If an operator explicitly marks one record `pending` (for example after a
+destination collision), pass `--skip-pending` to publish the other records
+without overwriting it. The manifest keeps the pending record and the same
+digest for a later decision.
 
 ## Migration pilot (bounded exception)
 
@@ -167,6 +231,8 @@ approval rules and does not execute SQL.
 ## Load details only when needed
 
 - Command flags and artifact meanings: [references/commands.md](references/commands.md)
+- Stored procedure inventory, review, lots and publication:
+  [references/routines.md](references/routines.md)
 - New, existing, notebook, sample, and publish paths: [references/workflows.md](references/workflows.md)
 - VPC, IAM, authentication, Workbench, SQL, digest, and plugin failures:
   [references/troubleshooting.md](references/troubleshooting.md)

@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "campaign_id": "analytics-notebook-route-update-202609",
+  "operation": "update",
+  "source_project": "analytics-487218",
+  "destination_project": "analytics-487218",
+  "source_location": "us-east1",
+  "destination_location": "us-east1",
+  "naming": "preserve_display_name",
+  "publish_incidents": true,
+  "execute_sql": false,
+  "secret_handling": "block",
+  "resources": [
+    {
+      "kind": "notebook",
+      "name": "projects/analytics-487218/locations/us-east1/repositories/REPOSITORY_ID",
+      "display_name": "Nombre visible del notebook"
+    }
+  ]
+}

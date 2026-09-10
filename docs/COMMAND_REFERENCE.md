@@ -34,6 +34,18 @@ salida vaya a ser procesada por Codex u otra herramienta.
 | `queryflow publish` | Crear una copia aprobada o actualizar en modo team. | sí | sí |
 | `queryflow migration dictionary` | Validar/renderizar el diccionario privado. | no | no |
 | `queryflow migration rewrite` | Planificar/aplicar rutas en una tarea local. | no | no |
+| `queryflow migration batch inventory` | Resolver y exportar una selección explícita sin escribir. | lectura | no |
+| `queryflow migration batch prepare` | Crear tareas, reescrituras y diffs sin publicar. | lectura | no |
+| `queryflow migration batch review` | Servir el Web Preview consolidado del lote. | no | no |
+| `queryflow migration batch run` | Crear copias o actualizar notebooks en sitio con un digest aprobado. | sí | sí (según `operation`) |
+| `queryflow migration batch resume` | Reanudar únicamente recursos pendientes del mismo tipo de operación. | sí | sí (según `operation`) |
+| `scripts/build_migration_detail_report.py` | Generar el informe HTML autocontenido y los respaldos JSON/Markdown portátiles de todos los lotes, rutas y recursos. | no | no |
+| `queryflow migration routines inventory` | Inventariar rutinas/procedimientos y accesos observados sin jobs SQL. | lectura | no |
+| `queryflow migration routines prepare` | Refrescar propuestas, dependencias, hashes y diffs locales. | lectura | no |
+| `queryflow migration routines review` | Crear o servir el Web Preview oscuro de procedimientos. | no | no |
+| `queryflow migration routines run` | Insertar rutinas nuevas en `DESTINO.functions` con digest aprobado. | sí | sí (solo nuevas) |
+| `queryflow migration routines resume` | Reanudar el mismo manifiesto/digest de rutinas. | sí | sí (solo nuevas) |
+| `queryflow migration routines report` | Regenerar reportes sin contactar GCP. | no | no |
 | `queryflow pilot inventory` | Seleccionar la muestra 10+10 sin escribir. | lectura | no |
 | `queryflow pilot prepare` | Crear tareas y Web Previews locales sin publicar. | lectura | no |
 | `queryflow pilot run` | Ejecutar el piloto y crear copias con autorización explícita. | sí | sí (solo copias) |
@@ -53,7 +65,7 @@ queryflow version --json
 
 ### `queryflow init`
 
-Crea un perfil local. Opciones principales: `--profile pilot|team|full-access|migration-pilot`,
+Crea un perfil local. Opciones principales: `--profile pilot|team|full-access|migration-pilot|migration-batch`,
 `--account`, `--gcloud-config-dir`, los proyectos y alias, los cuatro campos
 explícitos de Workbench (`--workbench-instance-project`,
 `--workbench-instance-location`, `--workbench-instance-name` y
@@ -96,7 +108,7 @@ queryflow context show --json
 ```
 
 Usa `permissions show` para ver el perfil activo y cambia entre `pilot`,
-`team`, `full-access` y `migration-pilot` con `permissions use`. El perfil `full-access` no
+`team`, `full-access`, `migration-pilot` y `migration-batch` con `permissions use`. El perfil `full-access` no
 ejecuta SQL ni elimina recursos; únicamente habilita una publicación explícita
 de notebooks o Shared Queries sin digest cuando el analista proporciona un
 motivo auditable:
@@ -115,6 +127,20 @@ auditoría, `force-authorization.json` y lectura remota de comprobación.
 manifest generado por `pilot inventory` y el interruptor explícito
 `--execute-migration` más el digest aprobado; crea copias nuevas y no ejecuta SQL. Consulta
 [MIGRATION_PILOT.md](MIGRATION_PILOT.md) para el flujo completo.
+
+`migration-batch` es el flujo oficial para selecciones explícitas. Consulta
+[MIGRATION_BATCH.md](MIGRATION_BATCH.md): no ejecuta SQL/dry-run, conserva los
+nombres visibles, acepta advertencias de rutas no cubiertas y requiere un
+digest global antes de crear copias o actualizaciones. Las actualizaciones
+requieren `operation=update`, el mismo proyecto en origen/destino y
+`allow_update_existing=true` en modo `team` o `full-access`.
+
+`migration routines` es el flujo copy-only para procedimientos almacenados y
+dependencias. Consulta [MIGRATION_ROUTINES.md](MIGRATION_ROUTINES.md): usa la
+API REST de BigQuery o Workbench como gateway, no crea jobs SQL, consolida las
+rutinas en `functions`, registra ACL observadas sin modificar IAM y exige un
+digest exacto antes de insertar. Los lotes se limitan localmente a 120
+peticiones/minuto (máximo configurable: 300).
 
 ### `queryflow finops`
 
@@ -157,8 +183,8 @@ otra combinación de flags.
 Usa `--dry-run` para ver las instrucciones antes de ejecutar cambios locales:
 
 ```bash
-queryflow install --ref v0.3.0-beta.1 --dry-run --json
-queryflow self-update --ref v0.3.0-beta.1 --dry-run --json
+queryflow install --ref v0.4.0-beta.1 --dry-run --json
+queryflow self-update --ref v0.4.0-beta.1 --dry-run --json
 ```
 
 Ambos comandos usan la misma referencia para el paquete Python y el plugin.
@@ -395,3 +421,16 @@ queryflow pilot run --manifest PRIVATE/manifest.json \
 Las rutas no cubiertas permanecen intactas y quedan en el reporte. La limpieza
 separada exige primero `cleanup-plan` y después el digest exacto en `cleanup`;
 las copias con `head` cambiado se omiten.
+
+Para nuevos trabajos, `queryflow migration batch` reemplaza al piloto.
+`inventory` resuelve únicamente los nombres de `SELECTION.json` contra el
+catálogo canónico; `prepare` genera una tarea y diff por recurso;
+`review --serve` expone el resumen oscuro; `run`/`resume` exigen
+`migration-batch`, `--execute-migration` y el mismo digest. Las rutas
+desconocidas, SQL dinámico, SQL mutante y SQL no clasificable se conservan para
+revisión humana y quedan en `migration-report.md` con su clasificación. Las
+copias se etiquetan `queryflow_review=required` y
+`queryflow_state=pending`; nunca se ejecuta SQL ni dry-run. Secretos,
+contenido vacío/malformado, colisiones, drift y errores de integridad siguen
+siendo bloqueos. `publish_incidents=false` en la selección recupera el modo
+estricto para las cuatro categorías de advertencia.

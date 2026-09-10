@@ -52,7 +52,37 @@ reales.
 Las Shared Queries siguen siendo activos de BigQuery Studio/Dataform; QueryFlow
 no crea un repositorio paralelo ni reemplaza el historial remoto.
 
-## Piloto de migración opcional
+## Migraciones de rutas
+
+El flujo oficial es `migration batch`: recibe una selección explícita, resuelve
+los recursos contra el catálogo, exporta solo código, crea tareas aisladas y
+calcula un digest global. Cada tarea reutiliza el diff rojo/verde del Web
+Preview y el lote produce un informe Markdown/JSON con archivo, celda y línea
+de cada ruta no cubierta. En `migration-batch`, las rutas desconocidas, SQL
+dinámico, mutante o no clasificable son incidencias de revisión humana: se
+copian como código, se etiquetan `queryflow_review=required` y
+`queryflow_state=pending`, y no se ejecutan. Una colisión, carrera del origen,
+secreto probable, contenido vacío o fallo de lectura posterior es un bloqueo.
+`run` solo crea copias nuevas después de la aprobación; `resume` conserva el
+digest y reintenta pendientes.
+
+El piloto 10+10 vive detrás de comandos separados (`migration` y `pilot`) como
+compatibilidad temporal.
+
+## Procedimientos almacenados
+
+`migration routines` es un adaptador independiente de Dataform: lee los
+recursos `Routine` de BigQuery por REST, conserva una instantánea con hashes y
+construye una propuesta en el dataset destino `functions`. Primero normaliza
+las llamadas a dependencias inventariadas y después aplica el diccionario de
+rutas de tablas. El manifiesto ordena dependencias, divide lotes y fija un
+digest; la publicación solo usa `routines.insert` sobre nombres inexistentes y
+comprueba la lectura posterior. No hay jobs SQL, `CALL`, dry-run, actualización,
+eliminación ni cambios de IAM. Para perímetros VPC, el mismo REST se puede
+transportar dentro de un kernel efímero de Workbench; el backend `auto` solo
+lo selecciona después de una lectura directa fallida por perímetro.
+
+## Piloto de migración opcional (legado)
 
 El piloto 10+10 vive detrás de comandos separados (`migration` y `pilot`). El
 catálogo y Dataform aportan únicamente el inventario/código; el diccionario

@@ -1,6 +1,8 @@
 from pathlib import Path
 
-from queryflow.config import load_config
+import pytest
+
+from queryflow.config import ConfigError, load_config
 from queryflow.config_store import ConfigStore
 
 
@@ -46,6 +48,45 @@ workbench_job_project = "jobs-project"
     }
     assert config.context_source_project == "replication"
     assert config.context_destination_project == "analytics"
+
+
+def test_loads_routine_migration_profile_settings(tmp_path):
+    path = tmp_path / "routines.toml"
+    path.write_text(
+        """
+active_profile = "migration-batch"
+
+[profiles.migration-batch]
+mode = "migration-batch"
+allow_routine_migration = true
+routine_backend = "auto"
+routine_destination_dataset = "functions"
+routine_batch_size = 20
+routine_requests_per_minute = 120
+""",
+        encoding="utf-8",
+    )
+
+    config = load_config(path)
+
+    assert config.allow_routine_migration is True
+    assert config.routine_backend == "auto"
+    assert config.routine_destination_dataset == "functions"
+    assert config.routine_batch_size == 20
+    assert config.routine_requests_per_minute == 120
+
+
+def test_rejects_zero_routine_batch_or_quota_limit(tmp_path):
+    path = tmp_path / "invalid-routines.toml"
+    path.write_text(
+        "active_profile = 'migration-batch'\n\n"
+        "[profiles.migration-batch]\n"
+        "mode = 'migration-batch'\n"
+        "routine_batch_size = 0\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ConfigError, match="routine_batch_size"):
+        load_config(path)
 
 
 def test_migrates_old_workbench_project_key_and_team_mode(tmp_path):

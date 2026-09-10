@@ -27,11 +27,11 @@ No pegues tokens en el README, en la configuración ni en una conversación.
 
 ### Instalación
 
-La beta disponible para el equipo es `v0.3.0-beta.1`:
+La beta disponible para el equipo es `v0.4.0-beta.1`:
 
 ```bash
-uvx --from git+https://github.com/3458Robyt/QueryFlow.git@v0.3.0-beta.1 \
-  queryflow install --ref v0.3.0-beta.1
+uvx --from git+https://github.com/3458Robyt/QueryFlow.git@v0.4.0-beta.1 \
+  queryflow install --ref v0.4.0-beta.1
 queryflow init --profile pilot
 ```
 
@@ -98,7 +98,8 @@ queryflow context show --json
 ```
 
 Los perfiles disponibles son `pilot` (solo copias), `team` (actualizaciones
-aprobadas), `full-access` y el perfil independiente `migration-pilot`.
+aprobadas), `full-access`, `migration-pilot` (compatibilidad) y
+`migration-batch` (lotes explícitos).
 `full-access` no ejecuta SQL ni elimina recursos;
 permite publicar un notebook o Shared Query con una orden explícita cuando el
 dry-run no está disponible:
@@ -114,7 +115,69 @@ La publicación force exige recurso canónico, destino permitido, control de
 conflictos, auditoría y lectura de comprobación. Genera
 `force-authorization.json`; el flujo normal continúa usando digest.
 
-### Piloto de migración (10 + 10)
+### Lote de migración
+
+Para migraciones nuevas usa [Lote de migración](docs/MIGRATION_BATCH.md). La
+selección de Analytics está en
+[`examples/analytics-migration-batch.selection.json`](examples/analytics-migration-batch.selection.json):
+
+```bash
+queryflow permissions use migration-batch
+queryflow migration batch inventory \
+  --selection-file examples/analytics-migration-batch.selection.json \
+  --dictionary PRIVATE/routes.json --catalog ~/.queryflow/catalog.json \
+  --account analyst@example.com \
+  --expected-shared-queries EXPECTED_SHARED_QUERIES \
+  --expected-notebooks EXPECTED_NOTEBOOKS --json
+queryflow migration batch prepare --manifest PRIVATE/manifest.json \
+  --dictionary PRIVATE/routes.json --account analyst@example.com --json
+queryflow migration batch review --manifest PRIVATE/manifest.json --serve
+```
+
+El lote conserva nombres visibles, muestra el diff
+consolidado y genera `migration-report.md`/`migration-report.json`. En el modo
+`operation=copy` crea copias nuevas; para corregir notebooks existentes usa
+`operation=update` con el mismo proyecto origen/destino y
+`allow_update_existing=true` en modo `team` o `full-access`. El modo update
+actualiza el repositorio canónico en sitio después de comprobar su commit y no
+crea una segunda copia. En el perfil `migration-batch` se pueden copiar como
+código para revisión humana las
+rutas no cubiertas, SQL dinámico, mutante o no clasificable. Esas copias llevan
+las etiquetas `queryflow_review=required` y `queryflow_state=pending`; no son
+ejecutables desde QueryFlow. Secretos, contenido vacío/malformado, conflictos,
+drift y fallos de integridad siguen bloqueados. Publicar requiere una
+aprobación única del `publication_digest`; nunca se ejecuta SQL ni dry-run.
+
+Cada campaña se divide en lotes de hasta 25 recursos (y hasta 5 para copias
+selladas). Cada lote tiene su propia selección, manifest, preview y digest; los
+artefactos privados quedan fuera del repositorio para no exponer código ni
+credenciales. En la campaña multirregional de notebooks preparada actualmente
+son 119 recursos con nombre en 9 lotes (8 normales y 1 sellado); 54 notebooks
+sin nombre y 6 duplicados quedaron registrados como excluidos o reemplazados.
+
+Para generar un reporte único con el detalle de todos los recursos de una
+campaña y de cada ruta reemplazada o no encontrada:
+
+```bash
+python3 scripts/build_migration_detail_report.py \
+  --campaign-root PRIVATE/notebook-campaign \
+  --expected-count EXPECTED_COUNT \
+  --campaign-prefix CAMPAIGN_PREFIX --json
+```
+
+El comando crea `campaign-detail-report.html` (entrega principal para analistas),
+`campaign-detail-report.md` (lectura lineal) y `campaign-detail-report.json`
+(consulta automatizada). El HTML es autocontenido: incluye la evidencia de cada
+recurso y el diff rojo/verde sin requerir servidor, dependencias ni internet.
+Los tres archivos omiten rutas locales de la máquina y conservan referencias
+relativas por lote. No incluyen filas de BigQuery ni resultados de consultas;
+el HTML contiene el código de los cambios normales, mientras que los recursos
+`sealed_copy` se muestran únicamente con metadatos y preview redactado. Todo
+debe compartirse únicamente por canales internos autorizados. La opción
+`--json` imprime un resumen JSON de la generación; el archivo completo queda en
+`campaign-detail-report.json`.
+
+### Piloto de migración legado (10 + 10)
 
 La migración de rutas es un flujo separado. El diccionario se guarda en una
 ruta privada fuera de Git y se aplica únicamente sobre tareas locales. El
@@ -164,6 +227,17 @@ como `published_with_incidents`).
 La limpieza nunca es automática: primero genera un plan y un digest separados
 con `queryflow pilot cleanup-plan`; solo una aprobación explícita de ese digest
 permite `queryflow pilot cleanup`.
+
+### Procedimientos almacenados
+
+La migración completa de procedimientos BigQuery usa un flujo independiente de
+Dataform. Lee las rutinas por REST (o por el gateway Workbench si el perímetro
+VPC lo exige), reescribe las rutas de tablas y las llamadas a dependencias, y
+prepara un diff oscuro con digest. No ejecuta SQL, `CALL` ni dry-run; solo crea
+rutinas nuevas en el dataset destino `functions`, sin sobrescribir las que ya
+existan. Consulta [Migración de procedimientos](docs/MIGRATION_ROUTINES.md)
+para configurar el perfil, revisar lotes, interpretar bloqueos y publicar con
+aprobación explícita.
 
 ## Flujo de trabajo
 
@@ -316,7 +390,9 @@ limitaciones y pasos propuestos, pero no cambian recursos GCP.
 - [Evaluación FinOps y salud cloud](plugins/queryflow/skills/queryflow-finops/SKILL.md).
 - [Guía del administrador GCP](docs/ADMIN_GUIDE.md).
 - [Informe de aceptación beta](docs/BETA_ACCEPTANCE.md).
-- [Piloto de migración](docs/MIGRATION_PILOT.md): diccionario privado,
+- [Lote de migración](docs/MIGRATION_BATCH.md): selección explícita, diff e
+  informe de la campaña Analytics.
+- [Piloto de migración legado](docs/MIGRATION_PILOT.md): diccionario privado,
   selección 10+10, publicación y limpieza separada.
 - [Seguridad](SECURITY.md) y [contribución](CONTRIBUTING.md).
 

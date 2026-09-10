@@ -1,4 +1,8 @@
-# Piloto de migración de rutas
+# Piloto de migración de rutas (legado)
+
+> Este documento describe el piloto 10+10 heredado. Para cualquier migración
+> nueva usa [MIGRATION_BATCH.md](MIGRATION_BATCH.md) y el comando
+> `queryflow migration batch`; `queryflow pilot` permanece como alias temporal.
 
 Este flujo prueba primero una migración pequeña y reversible: 10 Shared
 Queries y 10 notebooks. El objetivo es comprobar la reescritura de referencias

@@ -46,7 +46,8 @@ after access is corrected.
 
 | Symptom | Meaning | Safe action |
 | --- | --- | --- |
-| `mutating`, `unknown`, or dynamic SQL | QueryFlow cannot prove that the content is read-only. | Rewrite as a single literal read query or stop for analyst review. Never force a sample or execution. |
+| `mutating`, `unknown`, or dynamic SQL | QueryFlow cannot prove that the content is read-only. | Normal workflows block it. The explicit `migration-batch` code-copy lane may preserve it for human review, with no SQL execution or dry-run; never force a sample or execution. |
+| `empty_sql` or `embedded_secret` in migration-batch | The asset is empty or contains a credential-like literal. | Correct/remove the content and create a new batch; both remain hard blocks. |
 | multiple statements | One task contains more than one executable statement. | Split the work into separately reviewed tasks or select one notebook fragment explicitly for a sample. |
 | `prechecked` with no digest | Validation used `--static-only`; it is not publishable. | Run the configured real backend validation after access is ready. |
 | `changes_required`, `failed`, or SQL syntax error | Static analysis or backend validation rejected the current content. | Fix the task content, rerun `validate`, reopen `review`, and discard old approval digests. |
@@ -72,7 +73,7 @@ after access is corrected.
 Preview installer commands before running them:
 
 ```bash
-queryflow install --ref v0.3.0-beta.1 --dry-run --json
+queryflow install --ref v0.4.0-beta.1 --dry-run --json
 ```
 
 If the CLI works but Codex does not mention QueryFlow, confirm that the

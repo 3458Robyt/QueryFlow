@@ -46,7 +46,8 @@ No compartas tokens ni resultados completos de consultas. Comparte el estado,
 
 | Mensaje/estado | Qué significa | Qué hacer |
 | --- | --- | --- |
-| `mutating`, `unknown` o SQL dinámico | QueryFlow no puede demostrar que es lectura pura. | Convertirla en una consulta literal de lectura o detenerse para revisión. |
+| `mutating`, `unknown` o SQL dinámico | QueryFlow no puede demostrar que es lectura pura. | En los flujos normales se bloquea; en `migration-batch` se puede copiar como código para revisión humana, sin ejecutar ni hacer dry-run. |
+| `empty_sql` o `embedded_secret` en migration-batch | El recurso no tiene código ejecutable o contiene un secreto detectable. | Corregir/retirar el secreto y generar un lote nuevo; estas categorías nunca se copian automáticamente. |
 | Varias sentencias | La tarea contiene más de una unidad ejecutable. | Separar tareas o seleccionar un fragmento específico del notebook. |
 | `prechecked` sin digest | Se usó `--static-only`; aún no hay validación publicable. | Ejecutar validación real en el backend aprobado. |
 | `changes_required`, `failed` o error SQL | El contenido actual no pasó análisis o dry-run. | Corregir la tarea, validar de nuevo y descartar digests anteriores. |
@@ -69,7 +70,7 @@ No compartas tokens ni resultados completos de consultas. Comparte el estado,
 ## Instalación y plugin
 
 ```bash
-queryflow install --ref v0.3.0-beta.1 --dry-run --json
+queryflow install --ref v0.4.0-beta.1 --dry-run --json
 ```
 
 Si la CLI funciona pero Codex no reconoce QueryFlow, confirma que el

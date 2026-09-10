@@ -4,13 +4,14 @@ import base64
 import binascii
 import json
 import re
+import subprocess
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
 from collections import deque
 from dataclasses import dataclass
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Mapping, Optional
 
 from .catalog import ResourceRef
 from .gcloud import GcloudContext
@@ -276,6 +277,11 @@ class DataformClient:
     def read_file(self, repository: str, path: str) -> bytes:
         response = self.request("GET", f"{repository}:readFile", {"path": path}, None)
         contents = response.get("contents")
+        if contents is None and not response:
+            # Dataform returns an empty object for a zero-byte file.  Keep the
+            # resource in the migration manifest so it is reported as an
+            # invalid/empty notebook instead of aborting the whole lot.
+            return b""
         if not isinstance(contents, str):
             raise DataformError(f"Dataform no devolvió contenido para {path}")
         try:
@@ -315,19 +321,34 @@ class DataformClient:
         *,
         source: ExportedAsset,
         destination_project: str,
+        destination_location: str | None = None,
         destination_repository_id: str,
         display_name: str,
         content: bytes,
         author_name: str,
         author_email: str,
+        commit_message: str = "QueryFlow pilot copy",
+        labels: Mapping[str, str] | None = None,
     ) -> dict[str, str]:
         if destination_project != self.allowed_write_project:
             raise DataformError("El proyecto destino no coincide con la política del cliente")
         if not re.fullmatch(r"[a-z][a-z0-9-]{1,62}", destination_repository_id):
             raise DataformError("repository_id inválido")
-        location = source.resource.location
+        location = str(destination_location or source.resource.location).strip()
+        if not location:
+            raise DataformError("La región destino es obligatoria")
         repository = f"projects/{destination_project}/locations/{location}/repositories/{destination_repository_id}"
-        labels = dict(source.metadata.get("labels") or {})
+        source_labels = dict(source.metadata.get("labels") or {})
+        provided_labels = dict(labels or {})
+        for key, value in provided_labels.items():
+            if not isinstance(key, str) or not re.fullmatch(r"[a-z][a-z0-9_-]{0,62}", key):
+                raise DataformError(f"Etiqueta de Dataform inválida: {key!r}")
+            if not isinstance(value, str) or len(value) > 63:
+                raise DataformError(f"Valor de etiqueta de Dataform inválido: {key!r}")
+        labels = source_labels
+        labels.update(provided_labels)
+        # The asset type is a structural QueryFlow label and cannot be
+        # overridden by a campaign or caller-provided metadata.
         labels["single-file-asset-type"] = "notebook" if source.resource.kind == "notebook" else "sql"
         self.request(
             "POST",
@@ -342,7 +363,7 @@ class DataformClient:
             {
                 "commitMetadata": {
                     "author": {"name": author_name, "emailAddress": author_email},
-                    "commitMessage": "QueryFlow pilot copy",
+                    "commitMessage": commit_message,
                 },
                 "fileOperations": {
                     source.filename: {"writeFile": {"contents": base64.b64encode(content).decode("ascii")}}

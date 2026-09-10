@@ -361,13 +361,13 @@ print("QUERYFLOW_SAMPLE=" + json.dumps(summary, ensure_ascii=False, sort_keys=Tr
 """
 
 
-def _websocket_execute(
+def _open_workbench_websocket(
     http: _JupyterHttp,
     kernel_id: str,
-    code: str,
     *,
     timeout: int,
-) -> str:
+) -> Any:
+    """Open one reusable Jupyter kernel channel with bounded framing."""
     try:
         from websockets.sync.client import connect
     except ImportError as error:
@@ -378,6 +378,37 @@ def _websocket_execute(
     parsed = urlparse(http.base_url)
     ws_scheme = "wss" if parsed.scheme == "https" else "ws"
     ws_url = f"{ws_scheme}://{parsed.netloc}/api/kernels/{kernel_id}/channels"
+    try:
+        return connect(
+            ws_url,
+            additional_headers={
+                "Authorization": f"Bearer {http.token}",
+                "Cookie": http.cookie_header(),
+            },
+            origin=http.base_url,
+            open_timeout=timeout,
+            # Jupyter may leave the receive worker waiting after it has sent
+            # the idle status.  A long library default (10 s) is multiplied
+            # by every REST call in a routine inventory, so bound shutdown
+            # without changing the execution timeout or the response checks.
+            close_timeout=1,
+            # BigQuery routine definitions can be larger than the websockets
+            # library's 1 MiB default even when the SQL itself is valid.
+            max_size=16 * 1024 * 1024,
+        )
+    except WorkbenchError:
+        raise
+    except Exception as error:
+        raise WorkbenchError(f"Falló el canal WebSocket de Workbench: {error}", kind="transport") from error
+
+
+def _websocket_execute_on_connection(
+    websocket: Any,
+    kernel_id: str,
+    code: str,
+    *,
+    timeout: int,
+) -> str:
     session_id = str(uuid.uuid4())
     message_id = str(uuid.uuid4())
     message = {
@@ -402,41 +433,53 @@ def _websocket_execute(
     }
     output: list[str] = []
     try:
-        with connect(
-            ws_url,
-            additional_headers={
-                "Authorization": f"Bearer {http.token}",
-                "Cookie": http.cookie_header(),
-            },
-            origin=http.base_url,
-            open_timeout=timeout,
-        ) as websocket:
-            websocket.send(json.dumps(message, ensure_ascii=False))
-            deadline = time.monotonic() + timeout
-            while time.monotonic() < deadline:
-                raw = websocket.recv(timeout=max(1, deadline - time.monotonic()))
-                incoming = json.loads(raw)
-                parent = incoming.get("parent_header") or {}
-                if parent.get("msg_id") != message_id:
-                    continue
-                msg_type = (incoming.get("header") or {}).get("msg_type")
-                content = incoming.get("content") or {}
-                if msg_type == "stream":
-                    output.append(str(content.get("text") or ""))
-                elif msg_type == "error":
-                    raise WorkbenchError(
-                        f"El kernel de Workbench falló: {content.get('ename', 'Error')}: {content.get('evalue', '')}",
-                        kind="transport",
-                    )
-                elif msg_type == "status" and content.get("execution_state") == "idle":
-                    break
-            else:
-                raise WorkbenchError("La validación Workbench excedió el tiempo configurado", kind="transport")
+        websocket.send(json.dumps(message, ensure_ascii=False))
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            raw = websocket.recv(timeout=max(1, deadline - time.monotonic()))
+            incoming = json.loads(raw)
+            parent = incoming.get("parent_header") or {}
+            if parent.get("msg_id") != message_id:
+                continue
+            msg_type = (incoming.get("header") or {}).get("msg_type")
+            content = incoming.get("content") or {}
+            if msg_type == "stream":
+                output.append(str(content.get("text") or ""))
+            elif msg_type == "error":
+                raise WorkbenchError(
+                    f"El kernel de Workbench falló: {content.get('ename', 'Error')}: {content.get('evalue', '')}",
+                    kind="transport",
+                )
+            elif msg_type == "status" and content.get("execution_state") == "idle":
+                break
+        else:
+            raise WorkbenchError("La validación Workbench excedió el tiempo configurado", kind="transport")
     except WorkbenchError:
         raise
     except Exception as error:
         raise WorkbenchError(f"Falló el canal WebSocket de Workbench: {error}", kind="transport") from error
     return "".join(output)
+
+
+def _websocket_execute(
+    http: _JupyterHttp,
+    kernel_id: str,
+    code: str,
+    *,
+    timeout: int,
+    websocket: Any | None = None,
+) -> str:
+    """Execute code, optionally reusing an already-open kernel channel."""
+    if websocket is not None:
+        return _websocket_execute_on_connection(websocket, kernel_id, code, timeout=timeout)
+    try:
+        connection = _open_workbench_websocket(http, kernel_id, timeout=timeout)
+        with connection:
+            return _websocket_execute_on_connection(connection, kernel_id, code, timeout=timeout)
+    except WorkbenchError:
+        raise
+    except Exception as error:
+        raise WorkbenchError(f"Falló el canal WebSocket de Workbench: {error}", kind="transport") from error
 
 
 def parse_workbench_summary(

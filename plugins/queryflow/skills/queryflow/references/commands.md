@@ -31,6 +31,12 @@ digest; never abbreviate it when passing it to `sample` or `publish`. Add
 | `review` | yes | no | no |
 | `sample` | yes | yes, Workbench only | no |
 | `publish` | yes | yes | normal profiles: digest approval; full-access force: explicit reason and audit |
+| `migration routines inventory` | yes | read-only BigQuery REST/Workbench metadata | no |
+| `migration routines prepare` | yes | read-only source refresh and local proposal files | no |
+| `migration routines review` | yes | no | no |
+| `migration routines run` | yes | REST/Workbench reads plus destination insert | only new routines with exact digest |
+| `migration routines resume` | yes | same as `run` | only pending new routines with same digest |
+| `migration routines report` | yes | no | no |
 | `exception prepare` | yes | no | no |
 | `profile --execute` | yes | yes | no, read-only profiling only |
 
@@ -39,7 +45,7 @@ digest; never abbreviate it when passing it to `sample` or `publish`. Add
 Install the CLI and plugin from the same Git reference, then restart Codex:
 
 ```bash
-uvx --from git+https://github.com/3458Robyt/QueryFlow.git@v0.3.0-beta.1 queryflow install
+uvx --from git+https://github.com/3458Robyt/QueryFlow.git@v0.4.0-beta.1 queryflow install
 queryflow init --profile pilot \
   --source-projects source-project \
   --destination-projects destination-project \
@@ -106,6 +112,49 @@ queryflow publish --task TASK --force-publish \
 
 The command records `force-authorization.json`, verifies the remote head and
 reads the published file back. It never runs SQL or changes schedules.
+
+## Stored procedure migration
+
+The routine campaign is independent from Dataform assets. Enable the dedicated
+switch in a `migration-batch` profile and keep the route dictionary private:
+
+```bash
+queryflow init --profile migration-batch \
+  --account ACCOUNT --source-projects SOURCE_PROJECT \
+  --destination-projects DESTINATION_PROJECT \
+  --allow-routine-migration --routine-backend auto \
+  --routine-destination-dataset functions --json
+queryflow migration dictionary validate --dictionary PRIVATE/routes.json --json
+queryflow migration routines inventory \
+  --source-project SOURCE_PROJECT --destination-project DESTINATION_PROJECT \
+  --dictionary PRIVATE/routes.json --backend auto --account ACCOUNT --json
+queryflow migration routines prepare --manifest PRIVATE/manifest.json \
+  --dictionary PRIVATE/routes.json --account ACCOUNT --json
+queryflow migration routines review --manifest PRIVATE/manifest.json --serve
+```
+
+`inventory` and `prepare` use the BigQuery `routines` REST resource. `auto`
+falls back to a single ephemeral Workbench kernel only after a read-only VPC
+or perimeter failure. The kernel makes REST calls; it never invokes `bq
+query`, submits SQL, runs dry-run or calls a procedure. The client paces reads
+at 120 requests/minute by default and rejects a configured value above 300.
+
+Review `report.json`, `report.md`, `review.html` and the exact
+`publication_digest`. Publish only with an explicit switch and digest:
+
+```bash
+queryflow migration routines run --manifest PRIVATE/manifest.json \
+  --dictionary PRIVATE/routes.json --execute-migration \
+  --approved-digest DIGEST_COMPLETO --account ACCOUNT --json
+```
+
+`--lot N` uses the lot digest shown in the manifest. The destination dataset
+must already exist. Existing routines are never overwritten; missing or
+unsupported dependencies, conflicts, secrets, source drift and failed
+read-back remain blocked. Dynamic SQL, mutating SQL and unknown routes can be
+copied only with a human-review warning. See
+[MIGRATION_ROUTINES.md](../../../../docs/MIGRATION_ROUTINES.md) for the complete
+artifact and recovery contract.
 
 ## Discover resources
 
@@ -248,3 +297,30 @@ queryflow profile --table source-project.dataset.table \
 aggregate schema statistics; it does not replace validation and does not grant
 permission to run mutating SQL. Run `queryflow self-update --dry-run --json`
 before changing the installed reference.
+
+## Explicit migration batches
+
+New route migrations use the `migration-batch` profile and a selection JSON:
+
+```bash
+queryflow migration batch inventory --selection-file SELECTION.json \
+  --dictionary PRIVATE/routes.json --catalog ~/.queryflow/catalog.json \
+  --account ACCOUNT --json
+queryflow migration batch prepare --manifest PRIVATE/manifest.json \
+  --dictionary PRIVATE/routes.json --account ACCOUNT --json
+queryflow migration batch review --manifest PRIVATE/manifest.json --serve
+```
+
+The inventory resolves exact canonical resources, preserves visible names and
+records hashes, static class, changed files/cells and unmatched-route,
+dynamic-SQL, mutating or unclassifiable warnings. It executes no SQL or
+dry-run. A single `publication_digest` approval is required for `migration
+  batch run --execute-migration`; `resume` retries only pending resources with
+  that same digest. Set `operation=update` in the selection for an in-place
+  route correction; source and destination must be the same project, and the
+  active profile must allow updates. Use `--skip-pending` when a record was
+  explicitly deferred and the remaining resources should proceed. Inspect
+`migration-report.md` before approval. Accepted warnings
+are labelled `queryflow_review=required` and `queryflow_state=pending`; empty
+content, embedded secrets, conflicts, drift and integrity failures remain
+blocked. The old `pilot` command remains only as a deprecated 10+10 alias.

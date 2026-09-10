@@ -1,6 +1,6 @@
 {
   "name": "queryflow",
-  "version": "0.3.0b1",
+  "version": "0.4.0b1",
   "description": "Flujo gobernado para SQL, notebooks y evaluaciones FinOps de solo lectura en Google Cloud.",
   "author": {
     "name": "QueryFlow"
@@ -11,7 +11,7 @@
   "interface": {
     "displayName": "QueryFlow",
     "shortDescription": "SQL revisable y FinOps gobernado con evidencia de GCP.",
-    "longDescription": "Guía a Codex por el flujo existente de catálogo, contexto, tareas, diff, validación y publicación, y añade evaluaciones FinOps bajo demanda con fuentes por capas, cobertura empresarial y planes de solo lectura.",
+    "longDescription": "Guía a Codex por el flujo existente de catálogo, contexto, tareas, diff, validación y publicación; añade lotes explícitos de migración de rutas con un digest global e informes, y evaluaciones FinOps bajo demanda con fuentes por capas.",
     "developerName": "QueryFlow",
     "category": "Developer tools",
     "capabilities": ["Read", "Write"],
@@ -19,6 +19,7 @@
     "defaultPrompt": [
       "Usa QueryFlow para crear o modificar una query y mostrar el diff antes de publicar.",
       "Evalúa FinOps y salud cloud en los proyectos permitidos y resume oportunidades con evidencia.",
+      "Para migraciones nuevas usa migration batch, conserva los nombres visibles y muestra el informe de rutas no cubiertas.",
       "Confirma el contexto origen/destino antes de editar o publicar."
     ],
     "brandColor": "#1f6feb"
