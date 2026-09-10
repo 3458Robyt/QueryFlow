@@ -10,7 +10,7 @@ publica después de aprobar un digest exacto.
 Desde Cloud Shell:
 
 ```bash
-uvx --from git+https://github.com/3458Robyt/QueryFlow.git@v0.3.0-beta.1 queryflow install
+uvx --from git+https://github.com/3458Robyt/QueryFlow.git@v0.4.0-beta.1 queryflow install
 queryflow init
 ```
 
@@ -61,13 +61,14 @@ queryflow context set --source replication --destination analytics
 queryflow context show --json
 ```
 
-Puedes cambiar el perfil local con `queryflow permissions use pilot|team|full-access|migration-pilot`.
+Puedes cambiar el perfil local con `queryflow permissions use pilot|team|full-access|migration-pilot|migration-batch`.
 `full-access` solo está pensado para una orden explícita de publicación de un
 notebook o Shared Query cuando el dry-run no está disponible; no ejecuta SQL ni
 elimina recursos.
 
-Para probar la migración de rutas usa el perfil independiente
-`migration-pilot` y sigue la guía de [Piloto de migración](MIGRATION_PILOT.md).
+Para un lote nuevo usa el perfil `migration-batch` y la guía de [Lote de
+migración](MIGRATION_BATCH.md). `migration-pilot` y `queryflow pilot` quedan
+como compatibilidad temporal del piloto 10+10.
 
 ## 3. Crear o modificar una query
 

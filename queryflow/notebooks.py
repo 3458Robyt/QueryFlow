@@ -438,6 +438,12 @@ def rebuild_notebook_from_workspace(baseline: bytes, directory: Path) -> bytes:
         output_cells.append(cell)
     result = deepcopy(original)
     result["cells"] = output_cells
+    # A cell workspace is also created for an untouched notebook.  Avoid
+    # changing indentation/trailing-newline bytes when the reconstructed
+    # notebook is semantically identical to the baseline; its hash is part of
+    # the migration integrity contract.
+    if result == original:
+        return baseline
     return (json.dumps(result, ensure_ascii=False, indent=1) + "\n").encode("utf-8")
 
 

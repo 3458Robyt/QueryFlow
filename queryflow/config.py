@@ -45,6 +45,11 @@ class QueryflowConfig:
     policy_enforced: bool = False
     allow_static_exception: bool = False
     allow_force_publish: bool = False
+    allow_routine_migration: bool = False
+    routine_backend: str = "auto"
+    routine_destination_dataset: str = "functions"
+    routine_batch_size: int = 20
+    routine_requests_per_minute: int = 120
     project_aliases: dict[str, str] = field(default_factory=dict)
     context_source_project: Optional[str] = None
     context_destination_project: Optional[str] = None
@@ -109,14 +114,23 @@ def load_config(path: Optional[Path] = None) -> QueryflowConfig:
     audit_value = raw.get("audit_root")
     audit_root = str(audit_value) if audit_value else None
     mode = str(raw.get("mode") or "pilot")
-    if mode not in {"pilot", "team", "full-access", "migration-pilot"}:
-        raise ConfigError("mode debe ser pilot, team, full-access o migration-pilot")
+    if mode not in {"pilot", "team", "full-access", "migration-pilot", "migration-batch"}:
+        raise ConfigError("mode debe ser pilot, team, full-access, migration-pilot o migration-batch")
     validation_backend = str(raw.get("validation_backend") or "local")
     if validation_backend not in {"local", "workbench"}:
         raise ConfigError("validation_backend debe ser local o workbench")
     workbench_timeout_seconds = int(raw.get("workbench_timeout_seconds") or 240)
     if workbench_timeout_seconds <= 0:
         raise ConfigError("workbench_timeout_seconds debe ser mayor que cero")
+    routine_backend = str(raw.get("routine_backend") or "auto")
+    if routine_backend not in {"direct", "workbench", "auto"}:
+        raise ConfigError("routine_backend debe ser direct, workbench o auto")
+    routine_batch_size = _routine_int(raw.get("routine_batch_size"), 20, "routine_batch_size")
+    routine_requests_per_minute = _routine_int(raw.get("routine_requests_per_minute"), 120, "routine_requests_per_minute")
+    if not 1 <= routine_batch_size <= 100:
+        raise ConfigError("routine_batch_size debe estar entre 1 y 100")
+    if not 1 <= routine_requests_per_minute <= 300:
+        raise ConfigError("routine_requests_per_minute debe estar entre 1 y 300")
     return QueryflowConfig(
         workspace_root=workspace_root,
         catalog_path=catalog_path,
@@ -145,6 +159,11 @@ def load_config(path: Optional[Path] = None) -> QueryflowConfig:
         policy_max_bytes=min(int(raw.get("policy_max_bytes") or 10 * 1024 * 1024 * 1024), 10 * 1024 * 1024 * 1024),
         allow_static_exception=bool(raw.get("allow_static_exception", False)),
         allow_force_publish=bool(raw.get("allow_force_publish", mode == "full-access")),
+        allow_routine_migration=bool(raw.get("allow_routine_migration", False)),
+        routine_backend=routine_backend,
+        routine_destination_dataset=str(raw.get("routine_destination_dataset") or "functions"),
+        routine_batch_size=routine_batch_size,
+        routine_requests_per_minute=routine_requests_per_minute,
         project_aliases=_text_mapping(raw.get("project_aliases")),
         context_source_project=_optional_text(raw.get("source_project")),
         context_destination_project=_optional_text(raw.get("destination_project")),
@@ -183,9 +202,9 @@ def _load_toml_config(path: Path) -> QueryflowConfig:
     policy = Policy.from_mapping(raw.get("policy") if isinstance(raw.get("policy"), dict) else None)
     preferences_raw = raw.get("preferences")
     preferences: dict[str, Any] = dict(preferences_raw) if isinstance(preferences_raw, dict) else {}
-    mode = str(profile.get("mode") or {"team": "team", "full-access": "full-access", "migration-pilot": "migration-pilot"}.get(active, "pilot"))
-    if mode not in {"pilot", "team", "full-access", "migration-pilot"}:
-        raise ConfigError("mode debe ser pilot, team, full-access o migration-pilot")
+    mode = str(profile.get("mode") or {"team": "team", "full-access": "full-access", "migration-pilot": "migration-pilot", "migration-batch": "migration-batch"}.get(active, "pilot"))
+    if mode not in {"pilot", "team", "full-access", "migration-pilot", "migration-batch"}:
+        raise ConfigError("mode debe ser pilot, team, full-access, migration-pilot o migration-batch")
     max_bytes = int(profile.get("max_bytes") or policy.default_max_bytes)
     max_bytes = min(max_bytes, policy.max_bytes)
     workspace_root = Path(str(profile.get("workspace_root") or Path.home() / ".queryflow" / "tasks")).expanduser()
@@ -197,6 +216,15 @@ def _load_toml_config(path: Path) -> QueryflowConfig:
     timeout = int(profile.get("workbench_timeout_seconds") or 240)
     if timeout <= 0:
         raise ConfigError("workbench_timeout_seconds debe ser mayor que cero")
+    routine_backend = str(profile.get("routine_backend") or "auto")
+    if routine_backend not in {"direct", "workbench", "auto"}:
+        raise ConfigError("routine_backend debe ser direct, workbench o auto")
+    routine_batch_size = _routine_int(profile.get("routine_batch_size"), 20, "routine_batch_size")
+    routine_requests_per_minute = _routine_int(profile.get("routine_requests_per_minute"), 120, "routine_requests_per_minute")
+    if not 1 <= routine_batch_size <= 100:
+        raise ConfigError("routine_batch_size debe estar entre 1 y 100")
+    if not 1 <= routine_requests_per_minute <= 300:
+        raise ConfigError("routine_requests_per_minute debe estar entre 1 y 300")
     return QueryflowConfig(
         workspace_root=workspace_root,
         catalog_path=catalog_path,
@@ -226,6 +254,11 @@ def _load_toml_config(path: Path) -> QueryflowConfig:
         policy_enforced=True,
         allow_static_exception=bool(profile.get("allow_static_exception", False)),
         allow_force_publish=bool(profile.get("allow_force_publish", mode == "full-access")),
+        allow_routine_migration=bool(profile.get("allow_routine_migration", False)),
+        routine_backend=routine_backend,
+        routine_destination_dataset=str(profile.get("routine_destination_dataset") or "functions"),
+        routine_batch_size=routine_batch_size,
+        routine_requests_per_minute=routine_requests_per_minute,
         project_aliases=_text_mapping(raw.get("project_aliases")),
         context_source_project=_optional_text((raw.get("context") or {}).get("source_project") if isinstance(raw.get("context"), dict) else None),
         context_destination_project=_optional_text((raw.get("context") or {}).get("destination_project") if isinstance(raw.get("context"), dict) else None),
@@ -294,3 +327,10 @@ def _finops_window_days(value: Any) -> int:
     if days < 1 or days > 365:
         raise ConfigError("finops_window_days debe estar entre 1 y 365")
     return days
+
+
+def _routine_int(value: Any, default: int, name: str) -> int:
+    try:
+        return int(default if value is None else value)
+    except (TypeError, ValueError) as error:
+        raise ConfigError(f"{name} debe ser entero") from error

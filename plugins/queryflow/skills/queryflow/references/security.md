@@ -21,9 +21,13 @@ Do not collapse these boundaries to make a failing step pass.
 
 ## Immutable guardrails
 
-- SQL must be a single, provably read-only statement. Unknown, dynamic,
-  multi-statement, DML, DDL, transaction, export, load, and procedure content
-  is blocked.
+- Normal validation/sample/publish paths require one provably read-only SQL
+  statement. Unknown, dynamic, multi-statement, DML, DDL, transaction, export,
+  load, and procedure content is blocked there. The explicitly selected
+  `migration-batch` code-copy lane may preserve unknown, dynamic, mutating, or
+  unclassifiable code for human review, but it never executes or dry-runs it;
+  empty content, embedded secrets, malformed assets, conflicts, drift, and
+  integrity failures remain blocked.
 - The pilot creates new copies only. Deletion is never available. Existing
   updates require the separately approved `team` or `full-access` profile and
   a concurrency check.
@@ -37,6 +41,10 @@ Do not collapse these boundaries to make a failing step pass.
   values.
 - A remote read-back must match the approved content before publication is
   reported as successful.
+- A review-required migration copy carries `queryflow_review=required` and
+  `queryflow_state=pending` metadata. Labels do not technically prevent a
+  human with independent BigQuery permissions from executing the asset, so
+  the receiving team must review it before use.
 - Structured diagnostics use a stable `error_id` and retain only redacted
   messages, safe task context, recovery guidance, and provider identifiers.
   They never retain credentials, result rows, or full SQL payloads.

@@ -92,7 +92,51 @@ from .migration_pilot import (
     _selection,
     validate_pilot_manifest,
 )
+from .migration_batch import (
+    BATCH_KINDS,
+    BATCH_PENDING_STATUSES,
+    BATCH_QUOTA_REQUESTS_PER_MINUTE,
+    BATCH_REQUESTS_PER_MINUTE,
+    BatchError,
+    BatchSelection,
+    build_batch_digest,
+    build_batch_manifest,
+    build_sealed_digest,
+    classify_asset,
+    load_batch_manifest,
+    mask_sensitive_content,
+    normalize_display_name,
+    rewrite_asset,
+    partition_batch_records,
+    resolve_batch_resources,
+    render_batch_review,
+    save_batch_manifest,
+    serve_batch_review,
+    validate_batch_manifest,
+    write_batch_reports,
+)
 from .finops import load_assessment, run_assessment, serve_assessment
+from .routines import (
+    BigQueryRoutineClient,
+    RoutineError,
+    RoutineSnapshot,
+    WorkbenchRoutineTransport,
+    ROUTINE_BATCH_SIZE,
+    ROUTINE_DESTINATION_DATASET,
+    ROUTINE_REQUESTS_PER_MINUTE,
+    build_routine_digest,
+    build_routine_manifest,
+    build_routine_sealed_digest,
+    inventory_routine_snapshots,
+    load_routine_manifest,
+    publish_routines,
+    render_routine_review,
+    save_routine_manifest,
+    serve_routine_review,
+    validate_routine_manifest,
+    write_routine_audit,
+    write_routine_reports,
+)
 
 
 class CliError(RuntimeError):
@@ -141,8 +185,10 @@ def _modern_policy(config: QueryflowConfig) -> Policy:
         allow_force_publish=config.allow_force_publish and config.mode == "full-access",
         allow_static_exception=config.allow_static_exception and config.mode == "team",
         allow_migration_pilot=config.mode == "migration-pilot",
+        allow_migration_batch=config.mode in {"migration-batch", "migration-pilot"},
+        allow_routine_migration=config.allow_routine_migration and config.mode in {"migration-batch", "migration-pilot"},
         allow_migration_cleanup=config.mode == "migration-pilot",
-        allowed_resource_kinds=("notebook", "shared_query"),
+        allowed_resource_kinds=("notebook", "shared_query", "routine"),
         allowed_source_projects=config.source_projects,
         allowed_destination_projects=config.destination_projects,
         allowed_locations=config.allowed_locations,
@@ -179,8 +225,8 @@ def _cmd_version(args: argparse.Namespace) -> int:
 def _cmd_init(args: argparse.Namespace) -> int:
     path = Path(args.path).expanduser() if args.path else default_config_path()
     profile = args.profile or "pilot"
-    if profile not in {"pilot", "team", "full-access", "migration-pilot"}:
-        raise CliError("--profile debe ser pilot, team, full-access o migration-pilot")
+    if profile not in {"pilot", "team", "full-access", "migration-pilot", "migration-batch"}:
+        raise CliError("--profile debe ser pilot, team, full-access, migration-pilot o migration-batch")
     aliases: dict[str, str] = {}
     for raw_alias in args.project_alias or []:
         if "=" not in raw_alias:
@@ -206,7 +252,13 @@ def _cmd_init(args: argparse.Namespace) -> int:
         "allow_update_existing": profile in {"team", "full-access"},
         "allow_force_publish": profile == "full-access",
         "allow_migration_pilot": profile == "migration-pilot",
+        "allow_migration_batch": profile == "migration-batch",
         "allow_migration_cleanup": False,
+        "allow_routine_migration": bool(args.allow_routine_migration),
+        "routine_backend": args.routine_backend or "auto",
+        "routine_destination_dataset": args.routine_destination_dataset or "functions",
+        "routine_batch_size": args.routine_batch_size or ROUTINE_BATCH_SIZE,
+        "routine_requests_per_minute": args.routine_requests_per_minute or ROUTINE_REQUESTS_PER_MINUTE,
         "finops_projects": [item for item in (args.finops_projects or "").split(",") if item.strip()],
         "billing_export_table": args.billing_export_table or "",
         "business_context_path": args.business_context_path or "",
@@ -342,6 +394,8 @@ def _cmd_permissions(args: argparse.Namespace) -> int:
                     "mode": values.get("mode", name),
                     "allow_update_existing": bool(values.get("allow_update_existing", False)),
                     "allow_force_publish": bool(values.get("allow_force_publish", False)),
+                    "allow_migration_batch": bool(values.get("allow_migration_batch", False)),
+                    "allow_routine_migration": bool(values.get("allow_routine_migration", False)),
                     "validation_backend": values.get("validation_backend", "workbench"),
                 }
                 for name, values in document.profiles.items()
@@ -1193,6 +1247,7 @@ def _cmd_validate(args: argparse.Namespace) -> int:
     account = args.account or manifest.get("account")
     gcloud_context = _gcloud_context(config, account)
     extraction: dict[str, Any] | None = None
+    notebook_without_sql = False
     if is_notebook:
         filename = str(manifest["filename"])
         extracted = analyze_sql_fragments((task / filename).read_bytes())
@@ -1200,6 +1255,21 @@ def _cmd_validate(args: argparse.Namespace) -> int:
         extraction = extracted.to_dict()
         sql = "\n\n".join(fragment for _index, fragment in fragments)
         static = validate_sql_fragments(fragments)
+        if not fragments and not extracted.dynamic_cells and static.statement_class == "empty":
+            notebook_without_sql = True
+            static = static.__class__(
+                references=[],
+                statement_class="not_applicable",
+                read_only=False,
+                dry_run_ok=None,
+                bytes_processed=None,
+                maximum_bytes_billed=None,
+                within_configured_limit=None,
+                errors=[],
+                warnings=[],
+                fragments=[],
+                error_kind=None,
+            )
         if extracted.dynamic_cells:
             static = static.__class__(
                 references=static.references,
@@ -1221,8 +1291,10 @@ def _cmd_validate(args: argparse.Namespace) -> int:
     if backend not in {"local", "workbench"}:
         raise CliError("--backend debe ser local o workbench")
     backend_details: dict[str, Any] = {"backend": backend}
-    if args.static_only:
+    if args.static_only or notebook_without_sql:
         dry: dict[str, Any] = {"dry_run_ok": None, "skipped": True}
+        if notebook_without_sql:
+            dry["reason"] = "Notebook sin fragmentos SQL; se valida su estructura sin ejecutar SQL"
     else:
         if backend == "workbench":
             required = {
@@ -1314,7 +1386,7 @@ def _cmd_validate(args: argparse.Namespace) -> int:
         if not executed.ok:
             errors.append(executed.error or "La ejecución de lectura falló")
     validation = {
-        "ok": not errors and (args.static_only or dry.get("dry_run_ok") is True),
+        "ok": not errors and (args.static_only or notebook_without_sql or dry.get("dry_run_ok") is True),
         "static": static.to_dict(),
         "dry_run": dry,
         "execution": execution,
@@ -1478,6 +1550,582 @@ def _cmd_review(args: argparse.Namespace) -> int:
             server.serve_forever()
         finally:
             server.server_close()
+    return 0
+
+
+def _routine_dictionary(args: argparse.Namespace):
+    try:
+        return load_dictionary(Path(args.dictionary).expanduser())
+    except MigrationDictionaryError as error:
+        raise CliError(str(error)) from error
+
+
+def _routine_manifest_path(config: QueryflowConfig, campaign_id: str, output: str | None = None) -> Path:
+    if output:
+        return Path(output).expanduser()
+    return config.workspace_root.parent / "migrations" / campaign_id / "manifest.json"
+
+
+def _routine_project(config: QueryflowConfig, value: str | None, *, destination: bool) -> str:
+    selected = value or (_active_destination(config) if destination else _active_source(config))
+    if not selected:
+        raise CliError(
+            "Indica --destination-project/--source-project o configura context set antes de la campaña"
+        )
+    return _resolve_config_project(config, selected) or selected
+
+
+def _routine_account(config: QueryflowConfig, args: argparse.Namespace) -> str:
+    account = str(getattr(args, "account", None) or config.account or "").strip()
+    if not account:
+        raise CliError("--account es obligatorio para acceder a BigQuery")
+    return account
+
+
+def _routine_settings(config: QueryflowConfig) -> WorkbenchSettings:
+    required = {
+        "workbench_instance_project": config.workbench_instance_project,
+        "workbench_instance_location": config.workbench_instance_location,
+        "workbench_instance_name": config.workbench_instance_name,
+        "workbench_job_project": config.workbench_job_project,
+    }
+    missing = [name for name, value in required.items() if not value]
+    if missing:
+        raise CliError("La configuración Workbench no tiene: " + ", ".join(missing))
+    return WorkbenchSettings(
+        project=str(config.workbench_instance_project),
+        location=str(config.workbench_instance_location),
+        instance=str(config.workbench_instance_name),
+        job_project=str(config.workbench_job_project),
+        timeout_seconds=config.workbench_timeout_seconds,
+    )
+
+
+def _routine_client(
+    args: argparse.Namespace,
+    config: QueryflowConfig,
+    *,
+    source_project: str,
+    destination_project: str,
+    destination_dataset: str | None = None,
+    backend: str | None = None,
+) -> tuple[BigQueryRoutineClient, Any]:
+    selected = str(backend or getattr(args, "backend", None) or config.routine_backend or "auto")
+    if selected not in {"direct", "workbench", "auto"}:
+        raise CliError("El backend de rutinas debe ser direct, workbench o auto")
+    account = _routine_account(config, args)
+    context = _gcloud_context(config, account)
+    transport = None
+    if selected == "workbench":
+        transport = WorkbenchRoutineTransport(
+            _routine_settings(config),
+            account=account,
+            gcloud_context=context,
+        )
+        return (
+            BigQueryRoutineClient(
+                account,
+                destination_project,
+                source_project=source_project,
+                transport=transport,
+                requests_per_minute=config.routine_requests_per_minute,
+                request_timeout_seconds=float(getattr(args, "request_timeout", 180.0)),
+                gcloud_context=context,
+            ),
+            transport,
+        )
+    client = BigQueryRoutineClient(
+        account,
+        destination_project,
+        source_project=source_project,
+        requests_per_minute=config.routine_requests_per_minute,
+        request_timeout_seconds=float(getattr(args, "request_timeout", 180.0)),
+        gcloud_context=context,
+    )
+    if selected == "direct":
+        return client, None
+    # Auto selection is decided by a read-only perimeter probe. Do not switch
+    # backends halfway through a campaign after a partial write.
+    try:
+        client.list_datasets(source_project)
+        client.get_dataset(
+            destination_project,
+            destination_dataset or config.routine_destination_dataset,
+        )
+    except RoutineError as error:
+        message = str(error).upper()
+        if error.kind not in {"network", "permission", "transport"} or not any(
+            marker in message
+            for marker in ("VPC", "SERVICE_CONTROLS", "SECURITY_POLICY", "PERIMETER")
+        ):
+            raise
+        transport = WorkbenchRoutineTransport(
+            _routine_settings(config),
+            account=account,
+            gcloud_context=context,
+        )
+        return (
+            BigQueryRoutineClient(
+                account,
+                destination_project,
+                source_project=source_project,
+                transport=transport,
+                requests_per_minute=config.routine_requests_per_minute,
+                request_timeout_seconds=float(getattr(args, "request_timeout", 180.0)),
+                gcloud_context=context,
+            ),
+            transport,
+        )
+    return client, None
+
+
+def _routine_destination_snapshots(
+    client: BigQueryRoutineClient,
+    destination_project: str,
+    destination_dataset: str,
+    destination_location: str,
+) -> tuple[list[RoutineSnapshot], list[dict[str, Any]]]:
+    values: list[RoutineSnapshot] = []
+    errors: list[dict[str, Any]] = []
+    try:
+        summaries = client.list_routines(destination_project, destination_dataset)
+    except RoutineError as error:
+        if error.kind == "not_found":
+            raise CliError(
+                f"El dataset destino {destination_project}.{destination_dataset} no existe; "
+                "QueryFlow no crea datasets automáticamente"
+            ) from error
+        raise
+    for summary in summaries:
+        try:
+            reference = summary.get("routineReference") or {}
+            routine_id = str(reference.get("routineId") or "")
+            if not routine_id:
+                continue
+            full = client.get_routine(destination_project, destination_dataset, routine_id)
+            values.append(
+                RoutineSnapshot.from_routine(
+                    destination_project,
+                    destination_dataset,
+                    destination_location,
+                    full,
+                )
+            )
+        except RoutineError as error:
+            errors.append(
+                {"kind": error.kind, "routine": str(summary.get("routineReference") or ""), "message": str(error)[:500]}
+            )
+    return values, errors
+
+
+def _routine_policy_or_error(
+    config: QueryflowConfig,
+    *,
+    operation: str,
+    source: str,
+    destination: str,
+    location: str | None = None,
+) -> None:
+    policy = _modern_policy(config)
+    # Inventory must first read the destination metadata instead of guessing a
+    # location.  Keep project/resource checks now and apply an allowlisted
+    # location once the provider returns it.
+    if location is None and policy.allowed_locations:
+        policy = replace(policy, allowed_locations=())
+    decision = evaluate_policy(
+        policy,
+        operation=operation,
+        resource_kind="routine",
+        mode="copy",
+        source_project=source,
+        destination_project=destination,
+        location=location,
+    )
+    if not decision.allowed:
+        raise CliError(decision.message)
+
+
+def _cmd_routine_inventory(args: argparse.Namespace) -> int:
+    config = _config(args)
+    source_project = _routine_project(config, args.source_project, destination=False)
+    destination_project = _routine_project(config, args.destination_project, destination=True)
+    _routine_policy_or_error(
+        config,
+        operation="routine_campaign_publish",
+        source=source_project,
+        destination=destination_project,
+    )
+    dictionary = _routine_dictionary(args)
+    campaign_id = str(args.campaign_id or datetime.now(timezone.utc).strftime("routines-%Y%m%dT%H%M%SZ"))
+    output_path = _routine_manifest_path(config, campaign_id, args.output)
+    requested_backend = args.backend or config.routine_backend
+    destination_dataset = str(
+        args.destination_dataset or config.routine_destination_dataset or ROUTINE_DESTINATION_DATASET
+    )
+    client, transport = _routine_client(
+        args,
+        config,
+        source_project=source_project,
+        destination_project=destination_project,
+        destination_dataset=destination_dataset,
+        backend=requested_backend,
+    )
+    try:
+        destination_meta = client.get_dataset(destination_project, destination_dataset)
+        destination_location = str(destination_meta.get("location") or args.destination_location or "").strip()
+        if not destination_location:
+            raise CliError("No se pudo determinar la ubicación del dataset destino")
+        _routine_policy_or_error(
+            config,
+            operation="routine_campaign_publish",
+            source=source_project,
+            destination=destination_project,
+            location=destination_location,
+        )
+        source_access: list[dict[str, Any]] = []
+        source_snapshots, source_errors = inventory_routine_snapshots(
+            client,
+            source_project,
+            source_datasets=args.source_dataset,
+            default_location=str(args.source_location or ""),
+            access_report=source_access,
+        )
+        destination_snapshots, destination_errors = _routine_destination_snapshots(
+            client,
+            destination_project,
+            destination_dataset,
+            destination_location,
+        )
+        manifest = build_routine_manifest(
+            campaign_id=campaign_id,
+            source_project=source_project,
+            destination_project=destination_project,
+            destination_dataset=destination_dataset,
+            destination_location=destination_location,
+            source_snapshots=source_snapshots,
+            destination_snapshots=destination_snapshots,
+            dictionary=dictionary,
+            source_datasets=args.source_dataset,
+            secret_handling=args.secret_handling,
+            batch_size=args.batch_size or config.routine_batch_size,
+            source_inventory_errors=[*source_errors, *destination_errors],
+            backend=("workbench" if transport is not None else "direct"),
+            permissions={
+                "source": source_access,
+                "destination": [
+                    {
+                        "project": destination_project,
+                        "dataset": destination_dataset,
+                        "location": destination_location,
+                        "status": "read",
+                        "access": destination_meta.get("access") or [],
+                    }
+                ],
+                "automated_changes": [],
+            },
+        )
+        manifest["request_stats"] = client.request_stats.to_dict()
+        manifest["inventory"]["destination_routines"] = len(destination_snapshots)
+        _routine_write_proposals(manifest, output_path)
+        save_routine_manifest(manifest, output_path)
+        reports = write_routine_reports(manifest, output_path)
+    finally:
+        if transport is not None:
+            transport.close()
+    _print_result(
+        {
+            "ok": True,
+            "manifest": str(output_path),
+            "campaign_id": campaign_id,
+            "backend": manifest.get("backend"),
+            "inventory": manifest.get("inventory"),
+            "publication_digest": manifest.get("publication_digest"),
+            "sealed_publication_digest": manifest.get("sealed_publication_digest"),
+            "lots": manifest.get("lots"),
+            "reports": reports,
+        },
+        args.json,
+    )
+    return 0
+
+
+def _routine_rebuild_from_remote(
+    manifest: Mapping[str, Any],
+    args: argparse.Namespace,
+    config: QueryflowConfig,
+    dictionary: Any,
+) -> tuple[dict[str, Any], BigQueryRoutineClient, Any]:
+    source_project = str(manifest["source_project"])
+    destination_project = str(manifest["destination_project"])
+    client, transport = _routine_client(
+        args,
+        config,
+        source_project=source_project,
+        destination_project=destination_project,
+        destination_dataset=str(manifest.get("destination_dataset") or config.routine_destination_dataset),
+        backend=str(manifest.get("backend") or "direct"),
+    )
+    destination_dataset = str(manifest.get("destination_dataset") or config.routine_destination_dataset)
+    try:
+        destination_meta = client.get_dataset(destination_project, destination_dataset)
+        destination_location = str(destination_meta.get("location") or manifest.get("destination_location") or "")
+        if not destination_location:
+            raise CliError("No se pudo determinar la ubicación del dataset destino")
+        _routine_policy_or_error(
+            config,
+            operation="routine_campaign_publish",
+            source=source_project,
+            destination=destination_project,
+            location=destination_location,
+        )
+        source_access: list[dict[str, Any]] = []
+        source_datasets = [
+            str(item)
+            for item in (manifest.get("source_datasets") or [])
+            if str(item).strip()
+        ]
+        source_snapshots, source_errors = inventory_routine_snapshots(
+            client,
+            source_project,
+            source_datasets=source_datasets or None,
+            access_report=source_access,
+        )
+        destination_snapshots, destination_errors = _routine_destination_snapshots(
+            client, destination_project, destination_dataset, destination_location
+        )
+        rebuilt = build_routine_manifest(
+            campaign_id=str(manifest["campaign_id"]),
+            source_project=source_project,
+            destination_project=destination_project,
+            destination_dataset=destination_dataset,
+            destination_location=destination_location,
+            source_snapshots=source_snapshots,
+            destination_snapshots=destination_snapshots,
+            dictionary=dictionary,
+            source_datasets=source_datasets or None,
+            secret_handling=str((manifest.get("policy") or {}).get("secret_handling") or "block"),
+            batch_size=int(manifest.get("batch_size") or config.routine_batch_size),
+            source_inventory_errors=[*source_errors, *destination_errors],
+            backend=str(manifest.get("backend") or "direct"),
+            permissions={
+                "source": source_access,
+                "destination": [
+                    {
+                        "project": destination_project,
+                        "dataset": destination_dataset,
+                        "location": destination_location,
+                        "status": "read",
+                        "access": destination_meta.get("access") or [],
+                    }
+                ],
+                "automated_changes": [],
+            },
+        )
+        return rebuilt, client, transport
+    except Exception:
+        if transport is not None:
+            transport.close()
+        raise
+
+
+def _routine_write_proposals(manifest: dict[str, Any], manifest_path: Path) -> None:
+    root = manifest_path.parent / "proposals"
+    root.mkdir(parents=True, exist_ok=True)
+    for item in manifest.get("resources") or []:
+        source = item.get("source") or {}
+        routine_id = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(source.get("routine_id") or "routine"))
+        proposal_path = root / f"{int(item.get('ordinal') or 0):04d}_{routine_id}.sql"
+        if bool((item.get("security") or {}).get("sealed")):
+            proposal_path.write_text(
+                "[Contenido sellado; consultar el digest de seguridad y el ticket autorizado]\\n",
+                encoding="utf-8",
+            )
+        else:
+            proposal_path.write_text(
+                str((item.get("proposal") or {}).get("definitionBody") or ""),
+                encoding="utf-8",
+            )
+        item["proposal_file"] = str(proposal_path.relative_to(manifest_path.parent))
+
+
+def _cmd_routine_prepare(args: argparse.Namespace) -> int:
+    config = _config(args)
+    manifest_path = Path(args.manifest).expanduser()
+    manifest = load_routine_manifest(manifest_path)
+    _routine_policy_or_error(
+        config,
+        operation="routine_campaign_publish",
+        source=str(manifest.get("source_project") or ""),
+        destination=str(manifest.get("destination_project") or ""),
+        location=str(manifest.get("destination_location") or "") or None,
+    )
+    dictionary = _routine_dictionary(args)
+    rebuilt, client, transport = _routine_rebuild_from_remote(manifest, args, config, dictionary)
+    try:
+        _routine_write_proposals(rebuilt, manifest_path)
+        rebuilt["prepared_at"] = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        rebuilt["request_stats"] = client.request_stats.to_dict()
+        rebuilt["publication_digest"] = build_routine_digest(rebuilt)
+        rebuilt["sealed_publication_digest"] = build_routine_sealed_digest(rebuilt)
+        save_routine_manifest(rebuilt, manifest_path)
+        reports = write_routine_reports(rebuilt, manifest_path)
+    finally:
+        if transport is not None:
+            transport.close()
+    _print_result(
+        {
+            "ok": True,
+            "manifest": str(manifest_path),
+            "publication_digest": rebuilt.get("publication_digest"),
+            "sealed_publication_digest": rebuilt.get("sealed_publication_digest"),
+            "reports": reports,
+            "inventory": rebuilt.get("inventory"),
+        },
+        args.json,
+    )
+    return 0
+
+
+def _cmd_routine_review(args: argparse.Namespace) -> int:
+    manifest_path = Path(args.manifest).expanduser()
+    manifest = load_routine_manifest(manifest_path)
+    html_path = manifest_path.parent / "review.html"
+    html_path.write_text(render_routine_review(manifest), encoding="utf-8")
+    result: dict[str, Any] = {"review": str(html_path), "manifest": str(manifest_path)}
+    if args.serve:
+        server, url = serve_routine_review(manifest_path, args.port)
+        result["url"] = url
+        _print_result(result, args.json)
+        print(f"Review disponible en {url}", flush=True)
+        try:
+            server.serve_forever()
+        finally:
+            server.server_close()
+        return 0
+    _print_result(result, args.json)
+    return 0
+
+
+def _cmd_routine_run(args: argparse.Namespace) -> int:
+    if not args.execute_migration:
+        raise CliError("La publicación requiere --execute-migration y --approved-digest explícitos")
+    if not args.approved_digest:
+        raise CliError("--approved-digest es obligatorio para publicar rutinas")
+    config = _config(args)
+    manifest_path = Path(args.manifest).expanduser()
+    manifest = load_routine_manifest(manifest_path)
+    _routine_policy_or_error(
+        config,
+        operation="routine_campaign_publish",
+        source=str(manifest.get("source_project") or ""),
+        destination=str(manifest.get("destination_project") or ""),
+        location=str(manifest.get("destination_location") or "") or None,
+    )
+    dictionary = _routine_dictionary(args)
+    lot = int(args.lot) if args.lot is not None else None
+    validate_routine_manifest(
+        manifest,
+        approved_digest=args.approved_digest,
+        approved_sealed_digest=args.approved_sealed_digest,
+        security_reference=args.security_reference,
+        lot=lot,
+        allow_blocked=True,
+    )
+    client, transport = _routine_client(
+        args,
+        config,
+        source_project=str(manifest["source_project"]),
+        destination_project=str(manifest["destination_project"]),
+        destination_dataset=str(manifest.get("destination_dataset") or config.routine_destination_dataset),
+        backend=str(manifest.get("backend") or "direct"),
+    )
+    audit_path = manifest_path.parent / "routine-audit.json"
+    try:
+        audit_path = write_routine_audit(
+            manifest,
+            manifest_path,
+            approved_digest=args.approved_digest,
+            approved_sealed_digest=args.approved_sealed_digest,
+            security_reference=args.security_reference,
+            phase="approved",
+        )
+        receipts = publish_routines(
+            manifest,
+            client,
+            dictionary=dictionary,
+            approved_digest=args.approved_digest,
+            approved_sealed_digest=args.approved_sealed_digest,
+            security_reference=args.security_reference,
+            lot=lot,
+            allow_blocked=True,
+        )
+        execution = dict(manifest.get("execution") or {})
+        execution["receipts"] = [*execution.get("receipts", []), *receipts]
+        execution["published"] = sum(item.get("status") == "published_verified" for item in execution["receipts"])
+        execution["already_present"] = sum(item.get("status") == "already_present_identical" for item in execution["receipts"])
+        execution["blocked"] = sum(item.get("status") in {"blocked", "destination_conflict", "security_blocked"} for item in execution["receipts"])
+        execution["failed"] = sum(item.get("status") == "failed" for item in execution["receipts"])
+        execution["last_run_at"] = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        manifest["execution"] = execution
+        for receipt in receipts:
+            for record in manifest.get("resources") or []:
+                if (record.get("source") or {}).get("name") == receipt.get("source"):
+                    record["receipt"] = receipt
+                    if receipt.get("status") == "published_verified":
+                        record["status"] = "published_verified"
+                    elif receipt.get("status") == "already_present_identical":
+                        record["status"] = "already_present_identical"
+                    elif receipt.get("status") == "failed":
+                        record["status"] = "failed"
+        manifest["request_stats"] = client.request_stats.to_dict()
+        save_routine_manifest(manifest, manifest_path)
+        audit_path = write_routine_audit(
+            manifest,
+            manifest_path,
+            approved_digest=args.approved_digest,
+            approved_sealed_digest=args.approved_sealed_digest,
+            security_reference=args.security_reference,
+            phase="completed",
+            receipts=receipts,
+        )
+        reports = write_routine_reports(manifest, manifest_path)
+    except Exception as error:
+        # Preserve a failure checkpoint without including routine definitions
+        # or provider response bodies in the audit artifact.
+        write_routine_audit(
+            manifest,
+            manifest_path,
+            approved_digest=args.approved_digest,
+            approved_sealed_digest=args.approved_sealed_digest,
+            security_reference=args.security_reference,
+            phase="failed",
+            receipts=[{"status": "failed", "message": str(error)[:500]}],
+        )
+        raise
+    finally:
+        if transport is not None:
+            transport.close()
+    _print_result(
+        {
+            "ok": True,
+            "manifest": str(manifest_path),
+            "lot": lot,
+            "approved_digest": args.approved_digest,
+            "receipts": receipts,
+            "execution": manifest.get("execution"),
+            "reports": reports,
+            "audit": str(audit_path),
+        },
+        args.json,
+    )
+    return 0
+
+
+def _cmd_routine_report(args: argparse.Namespace) -> int:
+    manifest_path = Path(args.manifest).expanduser()
+    manifest = load_routine_manifest(manifest_path)
+    reports = write_routine_reports(manifest, manifest_path)
+    _print_result({"manifest": str(manifest_path), "reports": reports}, args.json)
     return 0
 
 
@@ -1972,6 +2620,800 @@ def _cmd_migration_rewrite(args: argparse.Namespace) -> int:
     except MigrationDictionaryError as error:
         raise CliError(str(error)) from error
     _print_result(report.to_dict(), args.json)
+    return 0
+
+
+def _batch_selection(args: argparse.Namespace) -> BatchSelection:
+    try:
+        selection = BatchSelection.load(Path(args.selection_file).expanduser())
+    except BatchError as error:
+        raise CliError(str(error)) from error
+    expected: dict[str, int] = {}
+    if getattr(args, "expected_shared_queries", None) is not None:
+        expected["shared_query"] = int(args.expected_shared_queries)
+    if getattr(args, "expected_notebooks", None) is not None:
+        expected["notebook"] = int(args.expected_notebooks)
+    try:
+        selection.validate_counts(expected or None)
+    except BatchError as error:
+        raise CliError(str(error)) from error
+    for argument, value in (
+        ("source_project", args.source_project),
+        ("destination_project", args.destination_project),
+        ("source_location", getattr(args, "source_location", None)),
+        ("destination_location", getattr(args, "destination_location", None)),
+    ):
+        if value and value != getattr(selection, argument):
+            raise CliError(f"--{argument.replace('_', '-')} no coincide con la selección del lote")
+    if args.location and args.location not in {selection.source_location, selection.destination_location}:
+        raise CliError("--location no coincide con la selección del lote")
+    return selection
+
+
+def _batch_catalog(args: argparse.Namespace, config: QueryflowConfig):
+    path = Path(args.catalog).expanduser() if getattr(args, "catalog", None) else config.catalog_path
+    try:
+        return load_catalog(path), path
+    except Exception as error:
+        raise CliError(f"No se pudo leer el catálogo para el lote: {error}") from error
+
+
+def _batch_manifest_path(config: QueryflowConfig, campaign_id: str, output: str | None = None) -> Path:
+    return (
+        Path(output).expanduser()
+        if output
+        else config.workspace_root.parent / "migrations" / campaign_id / "manifest.json"
+    )
+
+
+def _batch_client(args: argparse.Namespace, config: QueryflowConfig, selection: BatchSelection) -> DataformClient:
+    account = getattr(args, "account", None) or config.account
+    if not account:
+        raise CliError("--account es obligatorio para leer o publicar un lote remoto")
+    # Keep one resolved account for author metadata and the configured gcloud
+    # context; never fall back to an inherited temporary credential profile.
+    args.account = account
+    try:
+        requests_per_minute = int(getattr(args, "dataform_requests_per_minute", BATCH_REQUESTS_PER_MINUTE))
+    except (TypeError, ValueError) as error:
+        raise CliError("--dataform-requests-per-minute debe ser un entero") from error
+    if requests_per_minute <= 0 or requests_per_minute > BATCH_QUOTA_REQUESTS_PER_MINUTE:
+        raise CliError(f"--dataform-requests-per-minute debe estar entre 1 y {BATCH_QUOTA_REQUESTS_PER_MINUTE}")
+    # For in-place updates the destination is intentionally also the
+    # baseline project.  DataformClient's source-project write guard applies
+    # to copy migrations only; policy and the update-mode checks below still
+    # constrain writes to this exact allow-listed destination.
+    client_source_project = "" if selection.operation == "update" else selection.source_project
+    client = DataformClient(
+        account,
+        selection.destination_project,
+        source_project=client_source_project,
+        request_timeout_seconds=getattr(args, "request_timeout", 30.0),
+        requests_per_minute=requests_per_minute,
+        max_retries=DEFAULT_DATAFORM_MAX_RETRIES,
+    )
+    return _configure_dataform_client(client, config, account)
+
+
+def _batch_write_review(manifest: Mapping[str, Any], manifest_path: Path, *, output: str | None = None) -> Path:
+    target = Path(output).expanduser() if output else manifest_path.with_name("review.html")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    links = {
+        str(item.get("resource", {}).get("name")): str(item.get("review_relative"))
+        for item in (manifest.get("resources") or [])
+        if isinstance(item, Mapping) and item.get("review_relative")
+    }
+    target.write_text(render_batch_review(manifest, task_links=links), encoding="utf-8")
+    return target
+
+
+def _cmd_batch_inventory(args: argparse.Namespace) -> int:
+    config = _config(args)
+    selection = _batch_selection(args)
+    dictionary = _migration_dictionary(args)
+    try:
+        requested_rate = int(args.dataform_requests_per_minute)
+    except (TypeError, ValueError) as error:
+        raise CliError("--dataform-requests-per-minute debe ser un entero") from error
+    if requested_rate <= 0 or requested_rate > BATCH_QUOTA_REQUESTS_PER_MINUTE:
+        raise CliError(f"--dataform-requests-per-minute debe estar entre 1 y {BATCH_QUOTA_REQUESTS_PER_MINUTE}")
+    catalog, catalog_path = _batch_catalog(args, config)
+    discarded_resources: list[dict[str, Any]] = []
+    try:
+        resources = resolve_batch_resources(selection, catalog.resources, discarded=discarded_resources)
+    except BatchError as error:
+        raise CliError(str(error)) from error
+    requested_destination_names = {
+        (spec.kind, normalize_display_name(spec.display_name))
+        for spec in selection.resources
+    }
+    # Keep every Dataform repository in the destination region for ID/name
+    # reconciliation.  Filtering this list to the requested kind hid a
+    # cross-kind collision (for example an existing Shared Query occupying
+    # the repository ID proposed for a notebook).  We still export content
+    # only for same-kind names explicitly requested below.
+    destination_resources = [
+        item for item in catalog.resources
+        if item.project == selection.destination_project
+        and item.location == selection.destination_location
+        and item.kind in BATCH_KINDS
+    ]
+    # An in-place reconciliation reads the destination resource itself as the
+    # baseline.  It must not perform the copy workflow's second destination
+    # export or attempt display-name collision resolution.
+    if selection.operation == "update":
+        destination_resources = []
+    output_path = _batch_manifest_path(config, selection.campaign_id, args.output)
+    if output_path.exists():
+        raise CliError(f"Ya existe el manifest del lote: {output_path}; usa otro campaign_id o --output")
+    checkpoint_path = output_path.with_name("inventory-checkpoint.json")
+    assets: dict[str, Any] = {}
+    client: DataformClient | None = None
+    snapshots = Path(args.content_dir).expanduser() if args.content_dir else None
+    errors: list[dict[str, Any]] = []
+    if snapshots is None:
+        client = _batch_client(args, config, selection)
+    checkpoint_records: list[dict[str, Any]] = []
+
+    def save_checkpoint() -> None:
+        checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "schema_version": 1,
+            "status": "partial",
+            "campaign_id": selection.campaign_id,
+            "source_project": selection.source_project,
+            "destination_project": selection.destination_project,
+            "source_location": selection.source_location,
+            "destination_location": selection.destination_location,
+            "location": selection.destination_location,
+            "dictionary_sha256": dictionary.dictionary_sha256,
+            "processed": checkpoint_records,
+            "error_count": len(errors),
+            "dataform": client.request_stats.to_dict() if client is not None else {"requests_attempted": 0},
+            "updated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        }
+        temporary = checkpoint_path.with_name(f".{checkpoint_path.name}.tmp")
+        temporary.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        temporary.replace(checkpoint_path)
+
+    for resource in resources:
+        try:
+            if snapshots is not None:
+                snapshot = _local_snapshot_for(resource, snapshots)
+                if snapshot is None:
+                    raise BatchError(f"No se encontró snapshot local para {resource.display_name}")
+                content, _snapshot_filename = snapshot
+                # A private snapshot may be keyed by a hash; the remote
+                # Dataform asset still uses its canonical content filename.
+                filename = "content.ipynb" if resource.kind == "notebook" else "content.sql"
+                assets[resource.name] = {"content": content, "filename": filename, "head_commit": resource.fingerprint}
+            else:
+                exported = client.export(resource)
+                assets[resource.name] = exported
+            checkpoint_records.append({"resource": resource.to_dict(), "status": "read"})
+        except Exception as error:
+            errors.append({"resource": resource.to_dict(), "error": redact_message(str(error))[:500]})
+            checkpoint_records.append({"resource": resource.to_dict(), "status": "error", "error": errors[-1]["error"]})
+        save_checkpoint()
+    if errors:
+        error_path = output_path.with_name("inventory-errors.json")
+        error_path.parent.mkdir(parents=True, exist_ok=True)
+        error_path.write_text(json.dumps({"status": "blocked", "errors": errors}, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        raise CliError(f"El inventario no pudo exportar {len(errors)} recurso(s); revisa {error_path}")
+    destination_assets: dict[str, Any] = {}
+    for destination_resource in destination_resources:
+        if (
+            destination_resource.kind,
+            normalize_display_name(destination_resource.display_name),
+        ) not in requested_destination_names:
+            continue
+        try:
+            if snapshots is not None:
+                destination_snapshot = _local_snapshot_for(destination_resource, snapshots)
+                if destination_snapshot is None:
+                    continue
+                destination_content, _snapshot_filename = destination_snapshot
+                destination_assets[destination_resource.name] = {
+                    "content": destination_content,
+                    "filename": "content.ipynb" if destination_resource.kind == "notebook" else "content.sql",
+                    "head_commit": destination_resource.fingerprint,
+                }
+            else:
+                destination_assets[destination_resource.name] = client.export(destination_resource)
+        except Exception as error:
+            errors.append({"resource": destination_resource.to_dict(), "error": redact_message(str(error))[:500]})
+    if errors:
+        error_path = output_path.with_name("inventory-errors.json")
+        error_path.parent.mkdir(parents=True, exist_ok=True)
+        error_path.write_text(json.dumps({"status": "blocked", "errors": errors}, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        raise CliError(f"El inventario no pudo exportar {len(errors)} recurso(s); revisa {error_path}")
+    try:
+        manifest = build_batch_manifest(
+            selection,
+            resources,
+            assets,
+            dictionary,
+            destination_resources=destination_resources,
+            destination_assets=destination_assets,
+            discarded_resources=discarded_resources,
+            catalog_generated_at=catalog.generated_at,
+            requests_per_minute=requested_rate,
+        )
+    except BatchError as error:
+        raise CliError(str(error)) from error
+    manifest["inventory"] = {
+        "catalog": str(catalog_path),
+            "resources_resolved": len(resources),
+            "resources_discarded": len(discarded_resources),
+        "dataform": client.request_stats.to_dict() if client is not None else {"requests_attempted": 0},
+        "checkpoint": str(checkpoint_path),
+    }
+    # Inventory metadata is informative and must not alter the approval hash.
+    manifest["publication_digest"] = build_batch_digest(manifest)
+    save_batch_manifest(manifest, output_path)
+    try:
+        checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+        checkpoint["status"] = "complete"
+        checkpoint["updated_at"] = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        checkpoint_path.write_text(json.dumps(checkpoint, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    except (OSError, json.JSONDecodeError):
+        # The manifest remains usable; a missing checkpoint is reported by
+        # the caller rather than fabricating inventory state.
+        pass
+    report_json, report_md = write_batch_reports(manifest, output_path)
+    review = _batch_write_review(manifest, output_path)
+    blocked = manifest.get("status") == "blocked"
+    _print_result(
+        {
+            "ok": not blocked,
+            "campaign_id": selection.campaign_id,
+            "manifest": str(output_path),
+            "report_json": str(report_json),
+            "report_markdown": str(report_md),
+            "review": str(review),
+            "checkpoint": str(checkpoint_path),
+            "publication_digest": manifest.get("publication_digest"),
+            "selection_count": len(resources),
+            "warnings": len(manifest.get("warnings") or []),
+            "review_required": sum(
+                1 for item in manifest.get("resources", []) if (item.get("review") or {}).get("required")
+            ),
+            "destination_collisions": sum(1 for item in manifest.get("resources", []) if (item.get("destination") or {}).get("collision")),
+            "write_enabled": False,
+            "sql_executed": False,
+        },
+        args.json,
+    )
+    return 2 if blocked else 0
+
+
+def _batch_static_validation(
+    report: Any,
+    *,
+    classification: Mapping[str, Any] | None = None,
+    review: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    static = dict(classification or {})
+    static.setdefault("statement_class", "unknown")
+    static.setdefault("read_only", False)
+    static.setdefault("references", [])
+    static.setdefault("errors", [])
+    static.setdefault("warnings", [])
+    static.setdefault("dynamic_cells", [])
+    review_data = dict(review or {})
+    return {
+        "schema_version": 2,
+        "status": "ready",
+        "method": "migration_rewrite",
+        "backend": "local",
+        "ok": True,
+        "publishable": False,
+        "dry_run": {"skipped": True, "reason": "Migración de código: SQL y dry-run deshabilitados"},
+        "static": static,
+        "review": review_data,
+        "errors": [],
+        "content_sha256": report.proposed_sha256,
+        "migration": report.to_dict(),
+    }
+
+
+def _cmd_batch_prepare(args: argparse.Namespace) -> int:
+    config = _config(args)
+    manifest_path = Path(args.manifest).expanduser()
+    try:
+        manifest = load_batch_manifest(manifest_path)
+        dictionary = _migration_dictionary(args)
+        selection_for_validation = BatchSelection.from_mapping(manifest.get("selection") or {})
+        validate_batch_manifest(
+            manifest,
+            allow_blocked=True,
+            allow_sealed_pending=selection_for_validation.secret_handling == "sealed_copy",
+        )
+    except (BatchError, MigrationDictionaryError) as error:
+        raise CliError(str(error)) from error
+    if manifest.get("dictionary_sha256") != dictionary.dictionary_sha256:
+        raise CliError("El diccionario no coincide con el hash del lote")
+    is_update = selection_for_validation.operation == "update"
+    if is_update:
+        if config.mode not in {"team", "full-access"} or not config.allow_update_existing:
+            raise CliError("Preparar una actualización requiere mode team/full-access y allow_update_existing=true")
+    elif config.profile_name not in {"migration-batch", "migration-pilot"}:
+        raise CliError("La preparación requiere el perfil migration-batch (migration-pilot es alias temporal)")
+    source_project = str(manifest["source_project"])
+    destination_project = str(manifest["destination_project"])
+    if not config.source_projects or source_project not in config.source_projects:
+        raise CliError("El lote no coincide con la allowlist de proyectos origen configurada")
+    if not config.destination_projects or destination_project not in config.destination_projects:
+        raise CliError("El lote no coincide con la allowlist de proyectos destino configurada")
+    selection = selection_for_validation
+    client = _batch_client(args, config, selection)
+    # Keep tasks beside the manifest so the consolidated Web Preview can serve
+    # relative links without exposing files outside the campaign directory.
+    campaign_root = manifest_path.parent
+    execution = dict(manifest.get("execution") or {})
+    links: dict[str, str] = {}
+    prepared = 0
+    for record in manifest.get("resources") or []:
+        resource = ResourceRef.from_dict(dict(record["resource"]))
+        skipped_statuses = {"already_present", "already_compliant", "destination_conflict", "blocked", "pending"}
+        if record.get("status") in skipped_statuses:
+            execution[resource.name] = {
+                "status": str(record.get("status") or "pending"),
+                "reason": (
+                    "already_has_correct_routes"
+                    if record.get("status") == "already_compliant"
+                    else ("not_publishable_in_copy_only_mode" if not is_update else "not_ready_for_update")
+                ),
+                "repository": str((record.get("destination") or {}).get("repository") or ""),
+            }
+            continue
+        existing = execution.get(resource.name) or {}
+        if existing.get("status") == "prepared" and Path(str(existing.get("task") or "")).exists():
+            # Keep the immutable review decision in ``record.review``. Older
+            # manifests stored the HTML path under that key, so migrate that
+            # presentation field without overwriting the risk contract.
+            existing_copy = dict(existing)
+            legacy_review_path = existing_copy.pop("review", None)
+            if legacy_review_path and "review_file" not in existing_copy:
+                existing_copy["review_file"] = legacy_review_path
+            record.update(existing_copy)
+            if existing.get("review_relative"):
+                record["review_relative"] = existing["review_relative"]
+                links[resource.name] = str(existing["review_relative"])
+            prepared += 1
+            continue
+        exported = client.export(resource)
+        source = record.get("source") or {}
+        if source.get("head_commit") and exported.head_commit != source.get("head_commit"):
+            raise CliError(f"El recurso remoto cambió después del inventario: {resource.display_name}")
+        if hashlib.sha256(exported.content).hexdigest() != source.get("content_sha256"):
+            raise CliError(f"El contenido remoto cambió después del inventario: {resource.display_name}")
+        task_seed = f"{manifest['campaign_id']}-{resource.kind}-{int(record.get('ordinal', prepared + 1)):02d}"
+        # Campaign IDs can exceed the workspace task-id limit; truncating
+        # alone would make two notebooks share the same directory.  Keep a
+        # short canonical-name hash so every resource has a stable unique task.
+        task_id = _safe_task_id(
+            task_seed[:58].rstrip("-.")
+            + "-"
+            + hashlib.sha256(resource.name.encode("utf-8")).hexdigest()[:16]
+        )
+        sealed = bool((record.get("security") or {}).get("sealed"))
+        if sealed:
+            # Keep only a redacted baseline/proposal in the durable task. The
+            # exact source and rewritten bytes stay in memory for publication.
+            rewrite_report = rewrite_asset(resource.kind, exported.filename, exported.content, dictionary)
+            expected_proposed = str((record.get("rewrite") or {}).get("proposed_sha256") or "")
+            if expected_proposed and rewrite_report.proposed_sha256 != expected_proposed:
+                raise CliError(f"La reescritura no coincide con el inventario: {resource.display_name}")
+            before = mask_sensitive_content(resource.kind, exported.content)
+            after = mask_sensitive_content(resource.kind, rewrite_report.proposed_content)
+            task = create_workspace(
+                root=campaign_root,
+                task_id=task_id,
+                resource=resource,
+                content=before,
+                filename=exported.filename,
+                mode="update" if is_update else "sealed_copy",
+                account=args.account,
+            )
+            target = task / exported.filename
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(after)
+            update_manifest(
+                task,
+                secret_handling="sealed_copy",
+                redacted=True,
+                source_sha256=rewrite_report.before_sha256,
+                proposed_sha256=rewrite_report.proposed_sha256,
+            )
+            (task / "rewrite-report.json").write_text(
+                json.dumps(rewrite_report.to_dict(), ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+            classification = record.get("classification") or classify_asset(resource.kind, exported.filename, rewrite_report.proposed_content)
+        else:
+            task = create_workspace(
+                root=campaign_root,
+                task_id=task_id,
+                resource=resource,
+                content=exported.content,
+                filename=exported.filename,
+                mode="update" if is_update else "copy",
+                account=args.account,
+            )
+            if resource.kind == "notebook":
+                write_cell_workspace(exported.content, task / "cells")
+            rewrite_report = rewrite_task(task, dictionary, apply=True)
+            expected_proposed = str((record.get("rewrite") or {}).get("proposed_sha256") or "")
+            if expected_proposed and rewrite_report.proposed_sha256 != expected_proposed:
+                raise CliError(f"La reescritura no coincide con el inventario: {resource.display_name}")
+            before = exported.content
+            after = preview_notebook_task(task) if resource.kind == "notebook" else (task / exported.filename).read_bytes()
+            classification = classify_asset(resource.kind, exported.filename, after)
+            expected_classification = record.get("classification") or {}
+            if expected_classification and classification != expected_classification:
+                raise CliError(f"La clasificación no coincide con el inventario: {resource.display_name}")
+        validation = _batch_static_validation(
+            rewrite_report,
+            classification=classification,
+            review=record.get("review") or {},
+        )
+        (task / "validation.json").write_text(json.dumps(validation, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        review_path = write_review_html(
+            task,
+            before,
+            after,
+            validation,
+            {
+                "review_theme": config.review_theme,
+                "review_mode": config.review_mode,
+                "review_only_changes": config.review_only_changes,
+                "review_context_lines": config.review_context_lines,
+            },
+        )
+        mutable = {
+            "status": "prepared",
+            "task": str(task),
+            "review_file": str(review_path),
+            "review_relative": f"{task_id}/review.html",
+            "changed_files": list(rewrite_report.changed_files),
+            "proposed_sha256": rewrite_report.proposed_sha256,
+            "sealed_copy": sealed,
+            "redacted_review": sealed,
+        }
+        record.update(mutable)
+        execution[resource.name] = mutable
+        links[resource.name] = mutable["review_relative"]
+        prepared += 1
+        manifest["execution"] = execution
+        manifest["status"] = "prepared"
+        save_batch_manifest(manifest, manifest_path)
+    manifest["execution"] = execution
+    manifest["status"] = "prepared"
+    save_batch_manifest(manifest, manifest_path)
+    report_json, report_md = write_batch_reports(manifest, manifest_path)
+    review = _batch_write_review(manifest, manifest_path)
+    _print_result(
+        {
+            "ok": True,
+            "campaign_id": manifest["campaign_id"],
+            "prepared_count": prepared,
+            "manifest": str(manifest_path),
+            "report_json": str(report_json),
+            "report_markdown": str(report_md),
+            "review": str(review),
+            "publication_digest": manifest["publication_digest"],
+            "write_enabled": False,
+            "sql_executed": False,
+            "dataform": client.request_stats.to_dict(),
+        },
+        args.json,
+    )
+    return 0
+
+
+def _dataform_not_found(error: Exception) -> bool:
+    text = str(error).casefold()
+    return any(token in text for token in ("404", "not found", "not_found", "no encontrado"))
+
+
+def _cmd_batch_run(args: argparse.Namespace) -> int:
+    config = _config(args)
+    manifest_path = Path(args.manifest).expanduser()
+    if args.execute_migration and not args.approved_digest:
+        raise CliError("La publicación del lote requiere --approved-digest explícito")
+    try:
+        manifest = load_batch_manifest(manifest_path)
+        dictionary = _migration_dictionary(args)
+        run_selection = BatchSelection.from_mapping(manifest.get("selection") or {})
+        sealed_records = [
+            item
+            for item in (manifest.get("resources") or [])
+            if isinstance(item, Mapping) and bool((item.get("security") or {}).get("sealed"))
+        ]
+        validate_batch_manifest(
+            manifest,
+            approved_digest=args.approved_digest if args.execute_migration else None,
+            allow_blocked=bool(args.execute_migration),
+            allow_sealed_pending=bool(args.execute_migration and sealed_records),
+        )
+    except (BatchError, MigrationDictionaryError) as error:
+        raise CliError(str(error)) from error
+    is_update = run_selection.operation == "update"
+    if manifest.get("dictionary_sha256") != dictionary.dictionary_sha256:
+        raise CliError("El diccionario no coincide con el hash del lote")
+    if not args.execute_migration:
+        _print_result(
+            {
+                "ok": True,
+                "campaign_id": manifest["campaign_id"],
+                "status": manifest.get("status"),
+                "selection_count": len(manifest.get("resources") or []),
+                "publication_digest": manifest.get("publication_digest"),
+                "sealed_publication_digest": manifest.get("sealed_publication_digest", ""),
+                "write_enabled": False,
+                "sql_executed": False,
+                "message": "Plan cargado; publicar requiere --execute-migration y --approved-digest explícitos.",
+            },
+            args.json,
+        )
+        return 0
+    if is_update:
+        if config.mode not in {"team", "full-access"} or not config.allow_update_existing:
+            raise CliError("La publicación de una actualización requiere mode team/full-access y allow_update_existing=true")
+    elif config.profile_name not in {"migration-batch", "migration-pilot"}:
+        raise CliError("La publicación requiere el perfil migration-batch (migration-pilot es alias temporal)")
+    if sealed_records:
+        if run_selection.secret_handling != "sealed_copy":
+            raise CliError("El lote contiene secretos pero no está configurado como sealed_copy")
+        if not str(getattr(args, "security_reference", "") or "").strip():
+            raise CliError("La publicación sellada requiere --security-reference (ticket o autorización auditable)")
+        approved_sealed = str(getattr(args, "approved_sealed_digest", "") or "").strip()
+        expected_sealed = str(manifest.get("sealed_publication_digest") or "")
+        if not approved_sealed or approved_sealed != expected_sealed:
+            raise CliError("La publicación sellada requiere --approved-sealed-digest exacto e independiente")
+    elif getattr(args, "approved_sealed_digest", None) or getattr(args, "security_reference", None):
+        raise CliError("--approved-sealed-digest y --security-reference solo aplican a recursos sellados")
+    decision = evaluate_policy(
+        _modern_policy(config),
+        operation="publish" if is_update else "campaign_publish",
+        resource_kind="notebook" if is_update else "shared_query",
+        mode="update" if is_update else "copy",
+        source_project=manifest["source_project"],
+        destination_project=manifest["destination_project"],
+        location=str(manifest.get("destination_location") or manifest["location"]),
+    )
+    if not decision.allowed:
+        raise CliError(decision.message)
+    if config.audit_root is None and not args.audit_root:
+        raise CliError("Configura audit_root antes de publicar el lote")
+    selection = run_selection
+    client = _batch_client(args, config, selection)
+    records = manifest.get("resources") or []
+    try:
+        active_records, _published_records, pending_records = partition_batch_records(
+            records, skip_pending=bool(getattr(args, "skip_pending", False))
+        )
+    except BatchError as error:
+        raise CliError(str(error)) from error
+
+    execution = dict(manifest.get("execution") or {})
+    blocked_records = [
+        record
+        for record in active_records
+        if str(record.get("status") or "") in {"blocked", "destination_conflict", "security_pending"}
+    ]
+    active_records = [
+        record
+        for record in active_records
+        if str(record.get("status") or "") not in {"blocked", "destination_conflict", "security_pending"}
+    ]
+    for record in blocked_records:
+        resource = ResourceRef.from_dict(dict(record["resource"]))
+        execution[resource.name] = {
+            "status": str(record.get("status") or "blocked"),
+            "reason": "blocked_by_inventory_or_destination",
+            "task": str(record.get("task") or ""),
+        }
+        manifest["execution"] = execution
+    for record in active_records:
+        resource = ResourceRef.from_dict(dict(record["resource"]))
+        if not Path(str(record.get("task") or "")).is_dir():
+            raise CliError(f"El recurso no tiene tarea preparada: {resource.display_name}; ejecuta batch prepare")
+    # Validate every source head and destination collision before the first
+    # write.  This makes a stale inventory a hard, pre-publication blocker.
+    for record in active_records:
+        resource = ResourceRef.from_dict(dict(record["resource"]))
+        exported = client.export(resource)
+        source = record.get("source") or {}
+        if source.get("head_commit") and exported.head_commit != source.get("head_commit"):
+            raise CliError(f"El origen cambió antes de publicar: {resource.display_name}")
+        if hashlib.sha256(exported.content).hexdigest() != source.get("content_sha256"):
+            raise CliError(f"El contenido de origen cambió antes de publicar: {resource.display_name}")
+        if is_update:
+            destination = record.get("destination") or {}
+            if str(destination.get("repository") or "") != resource.name:
+                raise CliError(f"La actualización no apunta al repositorio canónico: {resource.display_name}")
+            continue
+        destination = record.get("destination") or {}
+        destination_location = str(manifest.get("destination_location") or manifest["location"])
+        repo = str(destination.get("repository") or f"projects/{manifest['destination_project']}/locations/{destination_location}/repositories/{destination['repository_id']}")
+        probe = ResourceRef(resource.kind, repo, manifest["destination_project"], destination_location, str(destination.get("display_name") or resource.display_name), "")
+        try:
+            client.get_repository(probe)
+        except DataformError as error:
+            if not _dataform_not_found(error):
+                raise CliError(f"No se pudo comprobar el destino de {resource.display_name}: {error}") from error
+        else:
+            # The destination may have changed after inventory (including a
+            # repository created by another operator).  Preserve the
+            # approved content digest, but record this runtime blocker in the
+            # audit manifest so the failed attempt is explainable and can be
+            # reconciled in a follow-up selection.  ``error`` and
+            # ``execution`` are intentionally outside the publication digest.
+            message = f"Ya existe el repositorio destino para {resource.display_name}; no se sobrescribe"
+            record["error"] = message
+            execution[resource.name] = {
+                "status": "destination_conflict",
+                "reason": "destination_exists_at_preflight",
+                "repository": repo,
+                "task": str(record.get("task") or ""),
+            }
+            manifest["execution"] = execution
+            manifest["status"] = "blocked"
+            save_batch_manifest(manifest, manifest_path)
+            raise CliError(message)
+    audit_store = _audit_store(args.audit_root or config.audit_root, gcloud_context=_gcloud_context(config, args.account))
+    for record in pending_records:
+        resource = ResourceRef.from_dict(dict(record["resource"]))
+        execution[resource.name] = {
+            "status": "pending",
+            "reason": "operator_deferred",
+            "task": str(record.get("task") or ""),
+        }
+    published_count = 0
+    failures: list[dict[str, Any]] = []
+    for record in active_records:
+        resource = ResourceRef.from_dict(dict(record["resource"]))
+        task = Path(str(record.get("task") or ""))
+        if not task.is_dir():
+            raise CliError(f"El recurso no tiene tarea preparada: {resource.display_name}; ejecuta batch prepare")
+        try:
+            # Recheck the source immediately before this write to catch a race
+            # occurring after the global preflight.
+            latest = client.export(resource)
+            source = record.get("source") or {}
+            if source.get("head_commit") and latest.head_commit != source.get("head_commit"):
+                raise BatchError("El origen cambió durante la publicación")
+            if source.get("content_sha256") and hashlib.sha256(latest.content).hexdigest() != source.get("content_sha256"):
+                raise BatchError("El contenido de origen cambió durante la publicación")
+            filename = str(source.get("filename") or latest.filename)
+            sealed = bool((record.get("security") or {}).get("sealed"))
+            if sealed:
+                # Recompute the proposal from the verified source in memory;
+                # the prepared task contains only the redacted review copy.
+                sealed_rewrite = rewrite_asset(resource.kind, filename, latest.content, dictionary)
+                expected_before = str((record.get("rewrite") or {}).get("before_sha256") or "")
+                expected = str((record.get("rewrite") or {}).get("proposed_sha256") or "")
+                if expected_before and sealed_rewrite.before_sha256 != expected_before:
+                    raise BatchError("El origen sellado no coincide con el digest del plan")
+                if expected and sealed_rewrite.proposed_sha256 != expected:
+                    raise BatchError("La tarea sellada no coincide con el digest del plan")
+                content = sealed_rewrite.proposed_content
+            else:
+                content = preview_notebook_task(task) if resource.kind == "notebook" else (task / filename).read_bytes()
+            expected = str((record.get("rewrite") or {}).get("proposed_sha256") or "")
+            if not sealed and expected and hashlib.sha256(content).hexdigest() != expected:
+                raise BatchError("La tarea preparada no coincide con el digest del plan")
+            audit_receipt = audit_store.archive(task)
+            destination = record["destination"]
+            if is_update:
+                published = client.update_file(
+                    resource.name,
+                    filename,
+                    content,
+                    required_head_commit=latest.head_commit,
+                    author_name="QueryFlow",
+                    author_email=args.account,
+                )
+            else:
+                published = client.create_copy(
+                    source=ExportedAsset(resource, filename, latest.content, latest.metadata, latest.head_commit),
+                    destination_project=manifest["destination_project"],
+                    destination_location=str(manifest.get("destination_location") or manifest["location"]),
+                    destination_repository_id=str(destination["repository_id"]),
+                    display_name=str(destination["display_name"]),
+                    content=content,
+                    author_name="QueryFlow migration batch",
+                    author_email=args.account,
+                    commit_message="QueryFlow migration batch copy",
+                    labels={
+                        "queryflow_review": "required" if (record.get("review") or {}).get("required") else "standard",
+                        "queryflow_state": "sealed_pending_review" if sealed else "pending",
+                        **({"queryflow_secret": "sealed"} if sealed else {}),
+                    },
+                )
+            saved = client.read_file(str(published["repository"]), filename)
+            if hashlib.sha256(saved).hexdigest() != hashlib.sha256(content).hexdigest():
+                raise BatchError("La lectura posterior no coincide con el contenido aprobado")
+            receipt = {
+                "task_id": task.name,
+                "published": published,
+                "audit": audit_receipt,
+                "classification": (record.get("classification") or {}).get("statement_class"),
+                "review": record.get("review") or {},
+                "secret_handling": "sealed_copy" if sealed else "block",
+                "security_reference": str(getattr(args, "security_reference", "") or "") if sealed else "",
+                "sql_executed": False,
+            }
+            audit_store.record_publish(task.name, receipt)
+            record.update({"status": "published", "published": published, "receipt": receipt})
+            execution[resource.name] = {"status": "published", **published, "task": str(task)}
+            published_count += 1
+        except Exception as error:
+            failure = {"resource": resource.to_dict(), "error": redact_message(str(error))[:500]}
+            failures.append(failure)
+            record.update({"status": "blocked" if _systemic_campaign_error(error) else "failed", "error": failure["error"]})
+            execution[resource.name] = {"status": record["status"], "error": failure["error"], "task": str(task)}
+            if record["status"] == "blocked":
+                manifest["execution"] = execution
+                manifest["status"] = "blocked"
+                save_batch_manifest(manifest, manifest_path)
+                raise CliError(str(error)) from error
+        manifest["execution"] = execution
+        manifest["status"] = "running"
+        save_batch_manifest(manifest, manifest_path)
+    manifest["execution"] = execution
+    if failures:
+        manifest["status"] = "partial"
+    elif pending_records:
+        manifest["status"] = "published_with_pending"
+    elif manifest.get("warnings"):
+        manifest["status"] = "published_with_warnings"
+    else:
+        manifest["status"] = "completed"
+    save_batch_manifest(manifest, manifest_path)
+    report_json, report_md = write_batch_reports(manifest, manifest_path)
+    _batch_write_review(manifest, manifest_path)
+    _print_result(
+        {
+            "ok": not failures,
+            "campaign_id": manifest["campaign_id"],
+            "status": manifest["status"],
+            "published_count": published_count,
+            "pending_count": len(pending_records),
+            "pending_resources": [
+                str((record.get("resource") or {}).get("display_name") or "")
+                for record in pending_records
+            ],
+            "failures": failures,
+            "publication_digest": manifest["publication_digest"],
+            "report_json": str(report_json),
+            "report_markdown": str(report_md),
+            "write_enabled": True,
+            "sql_executed": False,
+            "dataform": client.request_stats.to_dict(),
+        },
+        args.json,
+    )
+    return 0 if not failures else 2
+
+
+def _cmd_batch_review(args: argparse.Namespace) -> int:
+    try:
+        manifest = load_batch_manifest(Path(args.manifest).expanduser())
+    except BatchError as error:
+        raise CliError(str(error)) from error
+    path = _batch_write_review(manifest, Path(args.manifest).expanduser(), output=args.output)
+    result = {"ok": True, "review": str(path), "campaign_id": manifest["campaign_id"], "read_only": True}
+    _print_result(result, args.json)
+    if args.serve:
+        server, url = serve_batch_review(Path(args.manifest).expanduser(), args.port)
+        print(f"Review disponible en {url}", flush=True)
+        try:
+            server.serve_forever()
+        finally:
+            server.server_close()
     return 0
 
 
@@ -2828,7 +4270,7 @@ def _parser() -> argparse.ArgumentParser:
 
     init = sub.add_parser("init", help="crear o reconfigurar perfiles locales")
     init.add_argument("--path")
-    init.add_argument("--profile", choices=("pilot", "team", "full-access", "migration-pilot"), default="pilot")
+    init.add_argument("--profile", choices=("pilot", "team", "full-access", "migration-pilot", "migration-batch"), default="pilot")
     init.add_argument("--account")
     init.add_argument("--gcloud-config-dir")
     init.add_argument("--source-projects")
@@ -2851,6 +4293,11 @@ def _parser() -> argparse.ArgumentParser:
     init.add_argument("--billing-export-table", help="tabla opcional de Billing Export project.dataset.table")
     init.add_argument("--business-context-path", help="mapa TOML opcional de contexto empresarial")
     init.add_argument("--finops-window-days", type=int, default=30)
+    init.add_argument("--allow-routine-migration", action="store_true", help="habilitar explícitamente la campaña de rutinas")
+    init.add_argument("--routine-backend", choices=("direct", "workbench", "auto"), default="auto")
+    init.add_argument("--routine-destination-dataset", default="functions")
+    init.add_argument("--routine-batch-size", type=int, default=ROUTINE_BATCH_SIZE)
+    init.add_argument("--routine-requests-per-minute", type=int, default=ROUTINE_REQUESTS_PER_MINUTE)
     init.add_argument("--json", action="store_true")
     init.set_defaults(func=_cmd_init)
 
@@ -2913,7 +4360,7 @@ def _parser() -> argparse.ArgumentParser:
     permissions_show.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
     permissions_show.set_defaults(func=_cmd_permissions)
     permissions_use = permissions_sub.add_parser("use")
-    permissions_use.add_argument("profile", choices=("pilot", "team", "full-access", "migration-pilot"))
+    permissions_use.add_argument("profile", choices=("pilot", "team", "full-access", "migration-pilot", "migration-batch"))
     permissions_use.add_argument("--config", default=argparse.SUPPRESS)
     permissions_use.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
     permissions_use.set_defaults(func=_cmd_permissions)
@@ -2927,8 +4374,8 @@ def _parser() -> argparse.ArgumentParser:
     show_policy.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
     show_policy.set_defaults(func=_cmd_policy)
     check_policy = policy_sub.add_parser("check")
-    check_policy.add_argument("--operation", choices=("validate", "publish", "execute", "delete", "campaign_publish", "campaign_cleanup"), required=True)
-    check_policy.add_argument("--resource-kind", choices=("notebook", "shared_query", "scheduled_query"), required=True)
+    check_policy.add_argument("--operation", choices=("validate", "publish", "execute", "delete", "campaign_publish", "routine_campaign_publish", "campaign_cleanup"), required=True)
+    check_policy.add_argument("--resource-kind", choices=("notebook", "shared_query", "scheduled_query", "routine"), required=True)
     check_policy.add_argument("--mode", choices=("copy", "new", "update"), default="copy")
     check_policy.add_argument("--source-project")
     check_policy.add_argument("--destination-project")
@@ -3137,6 +4584,142 @@ def _parser() -> argparse.ArgumentParser:
     rewrite_apply.add_argument("--json", action="store_true")
     rewrite_apply.set_defaults(func=_cmd_migration_rewrite)
 
+    batch = migration_sub.add_parser("batch", help="lote explícito de migración (copias o actualizaciones)")
+    batch_sub = batch.add_subparsers(dest="batch_command", required=True)
+    batch_inventory = batch_sub.add_parser("inventory", help="resolver y exportar la selección sin escribir")
+    batch_inventory.add_argument("--selection-file", required=True, help="JSON con la lista explícita de recursos")
+    batch_inventory.add_argument("--dictionary", required=True)
+    batch_inventory.add_argument("--catalog")
+    batch_inventory.add_argument("--source-project")
+    batch_inventory.add_argument("--destination-project")
+    batch_inventory.add_argument("--location")
+    batch_inventory.add_argument("--source-location")
+    batch_inventory.add_argument("--destination-location")
+    batch_inventory.add_argument("--account")
+    batch_inventory.add_argument("--content-dir", help="snapshots privados para pruebas sin llamadas remotas")
+    batch_inventory.add_argument("--request-timeout", type=float, default=30.0)
+    batch_inventory.add_argument("--dataform-requests-per-minute", type=int, default=BATCH_REQUESTS_PER_MINUTE)
+    batch_inventory.add_argument("--expected-shared-queries", type=int)
+    batch_inventory.add_argument("--expected-notebooks", type=int)
+    batch_inventory.add_argument("--output")
+    batch_inventory.add_argument("--config")
+    batch_inventory.add_argument("--json", action="store_true")
+    batch_inventory.set_defaults(func=_cmd_batch_inventory)
+    batch_prepare = batch_sub.add_parser("prepare", help="crear tareas, reescrituras y diffs locales")
+    batch_prepare.add_argument("--manifest", required=True)
+    batch_prepare.add_argument("--dictionary", required=True)
+    batch_prepare.add_argument("--account")
+    batch_prepare.add_argument("--request-timeout", type=float, default=30.0)
+    batch_prepare.add_argument("--dataform-requests-per-minute", type=int, default=BATCH_REQUESTS_PER_MINUTE)
+    batch_prepare.add_argument("--config")
+    batch_prepare.add_argument("--json", action="store_true")
+    batch_prepare.set_defaults(func=_cmd_batch_prepare)
+    batch_run = batch_sub.add_parser("run", help="publicar copias nuevas o actualizaciones aprobadas")
+    batch_run.add_argument("--manifest", required=True)
+    batch_run.add_argument("--dictionary", required=True)
+    batch_run.add_argument("--execute-migration", action="store_true", help="habilita la publicación remota explícita")
+    batch_run.add_argument("--approved-digest", help="digest global aprobado explícitamente")
+    batch_run.add_argument("--approved-sealed-digest", help="digest independiente aprobado para copias con secretos sellados")
+    batch_run.add_argument("--security-reference", help="ticket o referencia auditable que autoriza la copia sellada")
+    batch_run.add_argument("--skip-pending", action="store_true", help="continuar con recursos marcados explícitamente como pendientes")
+    batch_run.add_argument("--account")
+    batch_run.add_argument("--audit-root")
+    batch_run.add_argument("--request-timeout", type=float, default=30.0)
+    batch_run.add_argument("--dataform-requests-per-minute", type=int, default=BATCH_REQUESTS_PER_MINUTE)
+    batch_run.add_argument("--config")
+    batch_run.add_argument("--json", action="store_true")
+    batch_run.set_defaults(func=_cmd_batch_run)
+    batch_resume = batch_sub.add_parser("resume", help="reanudar recursos pendientes con el mismo digest")
+    batch_resume.add_argument("--manifest", required=True)
+    batch_resume.add_argument("--dictionary", required=True)
+    batch_resume.add_argument("--execute-migration", action="store_true")
+    batch_resume.add_argument("--approved-digest", required=True)
+    batch_resume.add_argument("--approved-sealed-digest", help="digest independiente aprobado para copias con secretos sellados")
+    batch_resume.add_argument("--security-reference", help="ticket o referencia auditable que autoriza la copia sellada")
+    batch_resume.add_argument("--skip-pending", action="store_true", help="continuar con recursos marcados explícitamente como pendientes")
+    batch_resume.add_argument("--account")
+    batch_resume.add_argument("--audit-root")
+    batch_resume.add_argument("--request-timeout", type=float, default=30.0)
+    batch_resume.add_argument("--dataform-requests-per-minute", type=int, default=BATCH_REQUESTS_PER_MINUTE)
+    batch_resume.add_argument("--config")
+    batch_resume.add_argument("--json", action="store_true")
+    batch_resume.set_defaults(func=_cmd_batch_run)
+    batch_review = batch_sub.add_parser("review", help="crear el Web Preview consolidado")
+    batch_review.add_argument("--manifest", required=True)
+    batch_review.add_argument("--output")
+    batch_review.add_argument("--serve", action="store_true")
+    batch_review.add_argument("--port", type=int, default=8080)
+    batch_review.add_argument("--json", action="store_true")
+    batch_review.set_defaults(func=_cmd_batch_review)
+
+    routines = migration_sub.add_parser("routines", help="inventariar y migrar procedimientos BigQuery copy-only")
+    routines_sub = routines.add_subparsers(dest="routines_command", required=True)
+    routine_inventory = routines_sub.add_parser("inventory", help="inventario completo de rutinas sin ejecutar SQL")
+    routine_inventory.add_argument("--source-project")
+    routine_inventory.add_argument("--destination-project")
+    routine_inventory.add_argument("--source-dataset", action="append", help="limitar a un dataset origen; repetir para varios")
+    routine_inventory.add_argument("--destination-dataset")
+    routine_inventory.add_argument("--source-location")
+    routine_inventory.add_argument("--destination-location")
+    routine_inventory.add_argument("--dictionary", required=True)
+    routine_inventory.add_argument("--campaign-id")
+    routine_inventory.add_argument("--backend", choices=("direct", "workbench", "auto"))
+    routine_inventory.add_argument("--secret-handling", choices=("block", "sealed_copy"), default="block")
+    routine_inventory.add_argument("--batch-size", type=int)
+    routine_inventory.add_argument("--account")
+    routine_inventory.add_argument("--request-timeout", type=float, default=180.0)
+    routine_inventory.add_argument("--output")
+    routine_inventory.add_argument("--config")
+    routine_inventory.add_argument("--json", action="store_true")
+    routine_inventory.set_defaults(func=_cmd_routine_inventory)
+    routine_prepare = routines_sub.add_parser("prepare", help="refrescar propuestas, diffs y reportes locales")
+    routine_prepare.add_argument("--manifest", required=True)
+    routine_prepare.add_argument("--dictionary", required=True)
+    routine_prepare.add_argument("--account")
+    routine_prepare.add_argument("--request-timeout", type=float, default=180.0)
+    routine_prepare.add_argument("--backend", choices=("direct", "workbench", "auto"))
+    routine_prepare.add_argument("--config")
+    routine_prepare.add_argument("--json", action="store_true")
+    routine_prepare.set_defaults(func=_cmd_routine_prepare)
+    routine_review = routines_sub.add_parser("review", help="crear o servir el Web Preview de rutinas")
+    routine_review.add_argument("--manifest", required=True)
+    routine_review.add_argument("--serve", action="store_true")
+    routine_review.add_argument("--port", type=int, default=8080)
+    routine_review.add_argument("--json", action="store_true")
+    routine_review.set_defaults(func=_cmd_routine_review)
+    routine_run = routines_sub.add_parser("run", help="publicar únicamente rutinas nuevas con digest aprobado")
+    routine_run.add_argument("--manifest", required=True)
+    routine_run.add_argument("--dictionary", required=True)
+    routine_run.add_argument("--execute-migration", action="store_true")
+    routine_run.add_argument("--approved-digest")
+    routine_run.add_argument("--approved-sealed-digest")
+    routine_run.add_argument("--security-reference")
+    routine_run.add_argument("--lot", type=int)
+    routine_run.add_argument("--account")
+    routine_run.add_argument("--request-timeout", type=float, default=180.0)
+    routine_run.add_argument("--backend", choices=("direct", "workbench", "auto"))
+    routine_run.add_argument("--config")
+    routine_run.add_argument("--json", action="store_true")
+    routine_run.set_defaults(func=_cmd_routine_run)
+    routine_resume = routines_sub.add_parser("resume", help="reanudar un lote de rutinas con el mismo digest")
+    routine_resume.add_argument("--manifest", required=True)
+    routine_resume.add_argument("--dictionary", required=True)
+    routine_resume.add_argument("--execute-migration", action="store_true")
+    routine_resume.add_argument("--approved-digest", required=True)
+    routine_resume.add_argument("--approved-sealed-digest")
+    routine_resume.add_argument("--security-reference")
+    routine_resume.add_argument("--lot", type=int)
+    routine_resume.add_argument("--account")
+    routine_resume.add_argument("--request-timeout", type=float, default=180.0)
+    routine_resume.add_argument("--backend", choices=("direct", "workbench", "auto"))
+    routine_resume.add_argument("--config")
+    routine_resume.add_argument("--json", action="store_true")
+    routine_resume.set_defaults(func=_cmd_routine_run)
+    routine_report = routines_sub.add_parser("report", help="regenerar los informes de revisión")
+    routine_report.add_argument("--manifest", required=True)
+    routine_report.add_argument("--json", action="store_true")
+    routine_report.set_defaults(func=_cmd_routine_report)
+
     pilot = sub.add_parser("pilot", help="piloto de migración de 10 Shared Queries y 10 notebooks")
     pilot_sub = pilot.add_subparsers(dest="pilot_command", required=True)
     inventory = pilot_sub.add_parser("inventory", help="clasificar y seleccionar la muestra sin publicar")
@@ -3217,6 +4800,12 @@ def _parser() -> argparse.ArgumentParser:
 
 def main(argv: Optional[list[str]] = None) -> int:
     args = _parser().parse_args(argv)
+    if getattr(args, "command", None) == "pilot":
+        print(
+            "Aviso: `queryflow pilot` es un alias de compatibilidad deprecado; "
+            "usa `queryflow migration batch` para nuevos lotes.",
+            file=sys.stderr,
+        )
     try:
         return int(args.func(args))
     except Exception as error:
